@@ -1,0 +1,11 @@
+C:\src\ttasks-net\Ttasks.Core\bin\Debug\net8.0\Ttasks.Core.deps.json
+C:\src\ttasks-net\Ttasks.Core\bin\Debug\net8.0\Ttasks.Core.dll
+C:\src\ttasks-net\Ttasks.Core\bin\Debug\net8.0\Ttasks.Core.pdb
+C:\src\ttasks-net\Ttasks.Core\obj\Debug\net8.0\Ttasks.Core.GeneratedMSBuildEditorConfig.editorconfig
+C:\src\ttasks-net\Ttasks.Core\obj\Debug\net8.0\Ttasks.Core.AssemblyInfoInputs.cache
+C:\src\ttasks-net\Ttasks.Core\obj\Debug\net8.0\Ttasks.Core.AssemblyInfo.cs
+C:\src\ttasks-net\Ttasks.Core\obj\Debug\net8.0\Ttasks.Core.csproj.CoreCompileInputs.cache
+C:\src\ttasks-net\Ttasks.Core\obj\Debug\net8.0\Ttasks.Core.dll
+C:\src\ttasks-net\Ttasks.Core\obj\Debug\net8.0\refint\Ttasks.Core.dll
+C:\src\ttasks-net\Ttasks.Core\obj\Debug\net8.0\Ttasks.Core.pdb
+C:\src\ttasks-net\Ttasks.Core\obj\Debug\net8.0\ref\Ttasks.Core.dll
