@@ -76,6 +76,30 @@ public sealed class Task
         CreatedAt = DateTimeOffset.UtcNow;
     }
 
+    internal Task(
+        string id,
+        TaskType type,
+        string payload,
+        string? title,
+        string? description,
+        int? timeout,
+        TaskStatus status,
+        string? error,
+        string? blockedBy,
+        DateTimeOffset createdAt,
+        TaskResult? result)
+        : this(id, type, payload, title, description, timeout)
+    {
+        if (!Enum.IsDefined(typeof(TaskStatus), status))
+            throw new ArgumentOutOfRangeException(nameof(status));
+
+        Status = status;
+        Error = error;
+        BlockedBy = blockedBy;
+        CreatedAt = createdAt;
+        Result = result;
+    }
+
     private string _payload;
     private string _title;
     private string _description;
@@ -207,6 +231,20 @@ public sealed class Task
     internal void AttachResult(TaskResult result) => Result = result;
 
     internal void AttachBlockedBy(string? blockedBy) => BlockedBy = blockedBy;
+
+    internal static Task Restore(
+        string id,
+        TaskType type,
+        string payload,
+        string? title,
+        string? description,
+        int? timeout,
+        TaskStatus status,
+        string? error,
+        string? blockedBy,
+        DateTimeOffset createdAt,
+        TaskResult? result) =>
+        new(id, type, payload, title, description, timeout, status, error, blockedBy, createdAt, result);
 
     public override bool Equals(object? obj) => obj is Task other && Id == other.Id;
 

@@ -15,6 +15,13 @@ public sealed class TaskGraph
         CreatedAt = DateTimeOffset.UtcNow;
     }
 
+    private TaskGraph(string id, string? title, DateTimeOffset createdAt)
+    {
+        Id = id;
+        Title = title ?? string.Empty;
+        CreatedAt = createdAt;
+    }
+
     public string Id { get; }
     public string Title { get; set; }
     public DateTimeOffset CreatedAt { get; }
@@ -311,4 +318,22 @@ public sealed class TaskGraph
         public bool Equals(Task? x, Task? y) => x?.Id == y?.Id;
         public int GetHashCode(Task obj) => obj.Id.GetHashCode(StringComparison.Ordinal);
     }
+
+    internal IReadOnlyList<TaskGraphNodeSnapshot> SnapshotNodes() =>
+        _nodes.Values
+            .Select(node => new TaskGraphNodeSnapshot(node.Task, node.Dependencies.ToList(), node.Finally, node.Required))
+            .ToList();
+
+    internal static TaskGraph Restore(string id, string? title, DateTimeOffset createdAt, IEnumerable<TaskGraphNodeSnapshot> nodes)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(id);
+        ArgumentNullException.ThrowIfNull(nodes);
+
+        var graph = new TaskGraph(id, title, createdAt);
+        foreach (var node in nodes)
+            graph._nodes[node.Task.Id] = new GraphNode(node.Task, node.Dependencies.ToList(), node.Finally, node.Required);
+        return graph;
+    }
 }
+
+internal sealed record TaskGraphNodeSnapshot(Task Task, IReadOnlyList<Task> Dependencies, bool Finally, bool Required);

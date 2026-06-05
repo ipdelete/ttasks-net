@@ -23,7 +23,10 @@ then commit.
 - Phase 3 — Executor core: done
 - Phase 4 — In-memory store: done
 - Phase 5 — Graph scheduler: done (core graph scheduling, dependency validation, status views, finally/optional classification, and rule-focused tests now exist)
-- Phase 6+ — not started
+- Phase 6 — Process subprocess handlers: done
+- Phase 7 — Durable store: done
+- Phase 8 — Copilot / agent integration: done
+- Final conformance/e2e pass — not started
 
 ## Daily resume checklist
 
@@ -126,7 +129,7 @@ by `execute`, resolved by `submit`, and attached to `task.result`.
 
 ### Phase 0 — Docs and scaffold
 
-Status: **planned**
+Status: **done**
 
 Artifacts:
 
@@ -431,7 +434,7 @@ git commit -m "Implement graph scheduler (R-GRAPH-01..30)"
 
 ### Phase 6 — Process subprocess handlers
 
-Status: **planned**
+Status: **done**
 
 Implement:
 
@@ -449,10 +452,10 @@ Rule coverage:
 - `R-EVT-14`
 - relevant `R-TASK-14` termination reasons
 
-Suggested test file:
+Test file:
 
 ```text
-tests/Ttasks.Core.Tests/SubprocessTests.cs
+Ttasks.Tests/Phase6SubprocessConformanceTests.cs
 ```
 
 Important edge cases:
@@ -479,7 +482,7 @@ git commit -m "Implement subprocess handlers (R-EXEC-28..31)"
 
 ### Phase 7 — Durable store
 
-Status: **planned**
+Status: **done**
 
 Implement a durable backend. SQLite is canonical but not mandatory.
 Recommended .NET options:
@@ -492,10 +495,10 @@ Rule coverage:
 
 - `R-STORE-13..24`
 
-Suggested test file:
+Test file:
 
 ```text
-tests/Ttasks.Core.Tests/SqliteStoreTests.cs
+Ttasks.Tests/Phase7SqliteStoreConformanceTests.cs
 ```
 
 Important edge cases:
@@ -532,12 +535,13 @@ Rule coverage:
 
 - `R-COP-01..25`
 
-Suggested test files:
+Test files:
 
 ```text
-tests/Ttasks.Core.Tests/CopilotHandlerTests.cs
-tests/Ttasks.Core.Tests/CopilotSessionTests.cs
-tests/Ttasks.Core.Tests/CopilotE2ETests.cs
+Ttasks.Tests/Phase8LlmHandlerConformanceTests.cs
+Ttasks.Tests/Phase8LlmSessionConformanceTests.cs
+Ttasks.Tests/Phase8CopilotSdkProviderTests.cs
+Ttasks.Tests/Phase8CopilotE2EConformanceTests.cs
 ```
 
 Recommended design:

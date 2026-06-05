@@ -1,3 +1,6 @@
+using System.Diagnostics;
+using System.Text;
+
 namespace Ttasks.Core;
 
 public sealed class RetryPolicy
@@ -19,6 +22,63 @@ public sealed class RetryPolicy
 
 public sealed record PersistenceError(string Id, Exception Error);
 
+public interface ITaskFailureDetails
+{
+    string Output { get; }
+    string? ErrorOutput { get; }
+    int? ReturnCode { get; }
+    object? Raw { get; }
+    string TerminationReason { get; }
+}
+
+public class TaskExecutionException : InvalidOperationException, ITaskFailureDetails
+{
+    public TaskExecutionException(string message, string terminationReason, string output = "", string? errorOutput = null, int? returnCode = null, object? raw = null)
+        : base(message)
+    {
+        if (string.IsNullOrWhiteSpace(terminationReason))
+            throw new ArgumentException("Termination reason must be non-empty.", nameof(terminationReason));
+
+        TerminationReason = terminationReason;
+        Output = output;
+        ErrorOutput = errorOutput;
+        ReturnCode = returnCode;
+        Raw = raw;
+    }
+
+    public string Output { get; }
+    public string? ErrorOutput { get; }
+    public int? ReturnCode { get; }
+    public object? Raw { get; }
+    public string TerminationReason { get; }
+}
+
+public sealed class TaskTimeoutException : TaskExecutionException
+{
+    public TaskTimeoutException(string message, string output = "", string? errorOutput = null, int? returnCode = null, object? raw = null)
+        : base(message, "timeout", output, errorOutput, returnCode, raw)
+    {
+    }
+}
+
+internal sealed class TaskCancelledException : OperationCanceledException, ITaskFailureDetails
+{
+    public TaskCancelledException(string message, string output = "", string? errorOutput = null, int? returnCode = null, object? raw = null)
+        : base(message)
+    {
+        Output = output;
+        ErrorOutput = errorOutput;
+        ReturnCode = returnCode;
+        Raw = raw;
+    }
+
+    public string Output { get; }
+    public string? ErrorOutput { get; }
+    public int? ReturnCode { get; }
+    public object? Raw { get; }
+    public string TerminationReason => "cancelled";
+}
+
 public sealed class TaskExecutor : IDisposable
 {
     private readonly object _gate = new();
@@ -34,6 +94,17 @@ public sealed class TaskExecutor : IDisposable
     {
         Store = store;
     }
+
+    public static TaskExecutor WithBuiltInHandlers(ITaskStore? store = null)
+    {
+        var executor = new TaskExecutor(store);
+        executor.Register(TaskType.Bash, RunBash);
+        executor.Register(TaskType.Powershell, RunPowerShell);
+        return executor;
+    }
+
+    public static bool IsPowerShellAvailable() =>
+        FindExecutable("pwsh") is not null || FindExecutable("powershell") is not null;
 
     public EventBus Events => _events;
     public ITaskStore? Store { get; }
@@ -127,10 +198,10 @@ public sealed class TaskExecutor : IDisposable
 
             try
             {
+                var startedAt = DateTimeOffset.UtcNow;
                 var context = new TaskContext(task, this, upstreamSnapshot, cts.Token);
                 var raw = handler(context);
                 cts.Token.ThrowIfCancellationRequested();
-                var startedAt = DateTimeOffset.UtcNow;
                 var normalized = NormalizeResult(raw);
                 var result = new TaskResult
                 {
@@ -150,15 +221,33 @@ public sealed class TaskExecutor : IDisposable
                 _events.Publish(new TaskEvent(TaskEventType.Succeeded, task, TaskStatus.Succeeded, previousStatus: TaskStatus.Running));
                 return result;
             }
-            catch (OperationCanceledException)
+            catch (TaskExecutionException ex)
+            {
+                AttachFailedResult(task, ex.Message, ex);
+
+                if (attempt < retryPolicy.MaxAttempts)
+                {
+                    SleepBackoff(task, retryPolicy.BackoffSeconds);
+                    if (task.Status == TaskStatus.Cancelled)
+                        throw new OperationCanceledException("Task was cancelled during retry backoff.");
+                    continue;
+                }
+
+                throw;
+            }
+            catch (OperationCanceledException ex)
             {
                 if (task.Status != TaskStatus.Cancelled)
                 {
+                    var details = ex as ITaskFailureDetails;
                     var result = new TaskResult
                     {
                         TaskId = task.Id,
                         Status = TaskStatus.Cancelled,
-                        Error = "cancelled",
+                        Output = details?.Output ?? string.Empty,
+                        Error = details?.ErrorOutput ?? "cancelled",
+                        ReturnCode = details?.ReturnCode,
+                        Raw = details?.Raw,
                         StartedAt = DateTimeOffset.UtcNow,
                         FinishedAt = DateTimeOffset.UtcNow,
                         TerminationReason = "cancelled"
@@ -372,6 +461,184 @@ public sealed class TaskExecutor : IDisposable
         }
     }
 
+    private void AttachFailedResult(Task task, string error, ITaskFailureDetails details)
+    {
+        var result = new TaskResult
+        {
+            TaskId = task.Id,
+            Status = TaskStatus.Failed,
+            Output = details.Output,
+            Error = details.ErrorOutput ?? error,
+            ReturnCode = details.ReturnCode,
+            Raw = details.Raw,
+            StartedAt = DateTimeOffset.UtcNow,
+            FinishedAt = DateTimeOffset.UtcNow,
+            TerminationReason = details.TerminationReason
+        };
+        task.AttachResult(result);
+        task.TransitionTo(TaskStatus.Failed, error);
+        PersistTask(task);
+        _events.Publish(new TaskEvent(TaskEventType.Failed, task, TaskStatus.Failed, previousStatus: TaskStatus.Running));
+    }
+
+    private static object? RunBash(TaskContext context)
+    {
+        var bash = FindExecutable("bash") ?? throw new InvalidOperationException("Bash executable was not found.");
+        return RunProcess(context, new ShellCommand(bash, ["-lc", context.Payload]));
+    }
+
+    private static object? RunPowerShell(TaskContext context)
+    {
+        if (FindExecutable("pwsh") is { } pwsh)
+            return RunProcess(context, new ShellCommand(pwsh, ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", context.Payload]));
+
+        if (FindExecutable("powershell") is { } powershell)
+            return RunProcess(context, new ShellCommand(powershell, ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", context.Payload]));
+
+        throw new InvalidOperationException("PowerShell executable was not found.");
+    }
+
+    private static object? RunProcess(TaskContext context, ShellCommand command)
+    {
+        var startInfo = new ProcessStartInfo(command.FileName)
+        {
+            UseShellExecute = false,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            CreateNoWindow = true,
+            StandardOutputEncoding = Encoding.UTF8,
+            StandardErrorEncoding = Encoding.UTF8
+        };
+
+        foreach (var argument in command.Arguments)
+            startInfo.ArgumentList.Add(argument);
+
+        using var process = new Process { StartInfo = startInfo, EnableRaisingEvents = true };
+        var stdout = new StringBuilder();
+        var stderr = new StringBuilder();
+
+        if (!process.Start())
+            throw new InvalidOperationException($"Failed to start process '{command.FileName}'.");
+
+        var stdoutReader = ReadProcessStream(process.StandardOutput.BaseStream, "stdout", context, stdout);
+        var stderrReader = ReadProcessStream(process.StandardError.BaseStream, "stderr", context, stderr);
+        var deadline = context.Timeout.HasValue ? DateTimeOffset.UtcNow + TimeSpan.FromSeconds(context.Timeout.Value) : (DateTimeOffset?)null;
+
+        while (!process.WaitForExit(25))
+        {
+            if (context.Cancelled)
+            {
+                KillProcess(process);
+                WaitForReaders(stdoutReader, stderrReader);
+                throw new TaskCancelledException("Task was cancelled.", stdout.ToString(), NullIfEmpty(stderr.ToString()), TryGetExitCode(process),
+                    CreateRawProcessResult(stdout, stderr, TryGetExitCode(process)));
+            }
+
+            if (deadline.HasValue && DateTimeOffset.UtcNow >= deadline.Value)
+            {
+                KillProcess(process);
+                WaitForReaders(stdoutReader, stderrReader);
+                throw new TaskTimeoutException("Task timeout.", stdout.ToString(), NullIfEmpty(stderr.ToString()), TryGetExitCode(process),
+                    CreateRawProcessResult(stdout, stderr, TryGetExitCode(process)));
+            }
+        }
+
+        process.WaitForExit();
+        WaitForReaders(stdoutReader, stderrReader);
+
+        var output = stdout.ToString();
+        var error = NullIfEmpty(stderr.ToString());
+        var exitCode = process.ExitCode;
+        var raw = CreateRawProcessResult(stdout, stderr, exitCode);
+        if (exitCode != 0)
+            throw new TaskExecutionException($"Process exited with code {exitCode}.", "exit_code", output, error, exitCode, raw);
+
+        return raw;
+    }
+
+    private static async System.Threading.Tasks.Task ReadProcessStream(Stream stream, string outputStream, TaskContext context, StringBuilder buffer)
+    {
+        var bytes = new byte[4096];
+        while (true)
+        {
+            var read = await stream.ReadAsync(bytes).ConfigureAwait(false);
+            if (read == 0)
+                break;
+
+            var chunk = Encoding.UTF8.GetString(bytes, 0, read);
+            buffer.Append(chunk);
+            context.EmitOutput(outputStream, chunk);
+        }
+    }
+
+    private static void WaitForReaders(params System.Threading.Tasks.Task[] readers)
+    {
+        try
+        {
+            System.Threading.Tasks.Task.WaitAll(readers);
+        }
+        catch (AggregateException ex) when (ex.InnerExceptions.All(inner => inner is IOException or ObjectDisposedException))
+        {
+        }
+    }
+
+    private static void KillProcess(Process process)
+    {
+        try
+        {
+            if (!process.HasExited)
+                process.Kill(entireProcessTree: true);
+        }
+        catch (InvalidOperationException)
+        {
+        }
+    }
+
+    private static int? TryGetExitCode(Process process)
+    {
+        try
+        {
+            return process.HasExited ? process.ExitCode : null;
+        }
+        catch (InvalidOperationException)
+        {
+            return null;
+        }
+    }
+
+    private static object CreateRawProcessResult(StringBuilder stdout, StringBuilder stderr, int? returnCode) =>
+        new { stdout = stdout.ToString(), stderr = stderr.ToString(), returncode = returnCode };
+
+    private static string? NullIfEmpty(string value) => string.IsNullOrEmpty(value) ? null : value;
+
+    private static string? FindExecutable(string name)
+    {
+        var paths = (Environment.GetEnvironmentVariable("PATH") ?? string.Empty)
+            .Split(Path.PathSeparator, StringSplitOptions.RemoveEmptyEntries);
+        var extensions = OperatingSystem.IsWindows()
+            ? (Environment.GetEnvironmentVariable("PATHEXT") ?? ".EXE;.CMD;.BAT;.COM")
+                .Split(';', StringSplitOptions.RemoveEmptyEntries)
+            : [string.Empty];
+
+        foreach (var path in paths)
+        {
+            var candidate = Path.Combine(path, name);
+            if (File.Exists(candidate))
+                return candidate;
+
+            foreach (var extension in extensions)
+            {
+                var executable = candidate.EndsWith(extension, StringComparison.OrdinalIgnoreCase) ? candidate : candidate + extension;
+                if (File.Exists(executable))
+                    return executable;
+            }
+        }
+
+        return null;
+    }
+
+    private sealed record ShellCommand(string FileName, IReadOnlyList<string> Arguments);
+
     private static IReadOnlyDictionary<string, Task> SnapshotUpstream(IReadOnlyDictionary<string, Task>? upstream) =>
         upstream?.ToDictionary(kvp => kvp.Key, kvp => kvp.Value, StringComparer.Ordinal) ?? new Dictionary<string, Task>(StringComparer.Ordinal);
 
@@ -485,6 +752,7 @@ public sealed class TaskContext
     public int? Timeout => Task.Timeout;
     public TaskStatus Status => Task.Status;
     public bool Cancelled => Task.Status == TaskStatus.Cancelled || _cancellationToken.IsCancellationRequested || Executor.IsCancellationRequested(Task);
+    public CancellationToken CancellationToken => _cancellationToken;
     public Task Task { get; }
     public TaskExecutor Executor { get; }
     public IReadOnlyDictionary<string, Task> Upstream => _upstream;
@@ -502,5 +770,10 @@ public sealed class TaskContext
         RaiseIfCancelled();
 
         Executor.Events.Publish(new TaskEvent(TaskEventType.Progress, Task, Task.Status, progressPercent: percent, progressMessage: message));
+    }
+
+    public void EmitOutput(string stream, string chunk)
+    {
+        Executor.Events.Publish(new TaskEvent(TaskEventType.Output, Task, Task.Status, outputStream: stream, outputChunk: chunk));
     }
 }
