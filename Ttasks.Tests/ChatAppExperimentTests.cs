@@ -68,7 +68,7 @@ public sealed class ChatAppExperimentTests
         var store = new InMemoryStore();
         var provider = new CompositeCapabilityProvider(
         [
-            new TeamsCapabilityProvider(new StoreBackedTaskLibrary(store), new TaskLibraryTemplateRenderer(), CreateChatOptions())
+            new TeamsCapabilityProvider(new StoreBackedTaskLibrary(store), new TaskLibraryTemplateRenderer(), new FakeTeamsChatMetadataResolver(), CreateChatOptions())
         ]);
         var capabilities = provider.GetCapabilities(new CapabilityRequest(
             "page-1",
@@ -82,6 +82,42 @@ public sealed class ChatAppExperimentTests
             },
             capabilities.Capabilities.Select(capability => capability.Payload));
         Assert.All(capabilities.Capabilities, capability => Assert.StartsWith("cap-", capability.Id, StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void Chat_App_Teams_Provider_Stores_Chat_Topic_Aliases()
+    {
+        var store = new InMemoryStore();
+        var library = new StoreBackedTaskLibrary(store);
+        var provider = new TeamsCapabilityProvider(
+            library,
+            new TaskLibraryTemplateRenderer(),
+            new FakeTeamsChatMetadataResolver(("19:aet@thread.v2", "🔒AET SWE Chat")),
+            CreateChatOptions());
+
+        var capabilities = provider.GetCapabilities(new CapabilityRequest("page-1", "read 19:aet@thread.v2"));
+
+        var capability = Assert.Single(capabilities.Capabilities);
+        Assert.Equal("Read Teams chat 🔒AET SWE Chat", capability.DisplayName);
+        var item = Assert.Single(library.All());
+        Assert.Equal("🔒AET SWE Chat", item.Metadata["teamsChatTopic"]);
+        Assert.Contains("aet swe chat", Assert.IsAssignableFrom<IEnumerable<object?>>(item.Metadata["teamsChatAliases"]).OfType<string>());
+    }
+
+    [Fact]
+    public void Chat_App_Teams_Provider_Resolves_Previously_Stored_Chat_By_Alias()
+    {
+        var store = new InMemoryStore();
+        var library = new StoreBackedTaskLibrary(store);
+        var resolver = new FakeTeamsChatMetadataResolver(("19:aet@thread.v2", "🔒AET SWE Chat"));
+        var provider = new TeamsCapabilityProvider(library, new TaskLibraryTemplateRenderer(), resolver, CreateChatOptions());
+        provider.GetCapabilities(new CapabilityRequest("page-1", "read 19:aet@thread.v2"));
+
+        var aliasCapabilities = provider.GetCapabilities(new CapabilityRequest("page-1", "read teams chat aet swe chat"));
+
+        var capability = Assert.Single(aliasCapabilities.Capabilities);
+        Assert.Equal("teams read 19:aet@thread.v2 -n 20 --json", capability.Payload);
+        Assert.Equal("Read Teams chat 🔒AET SWE Chat", capability.DisplayName);
     }
 
     [Fact]
@@ -231,7 +267,7 @@ public sealed class ChatAppExperimentTests
             new GraphPlanBuilder(),
             registry ?? new ChatSessionRegistry(provider, CreateChatOptions()),
             store,
-            new CompositeCapabilityProvider([new TeamsCapabilityProvider(library, new TaskLibraryTemplateRenderer(), CreateChatOptions())]),
+            new CompositeCapabilityProvider([new TeamsCapabilityProvider(library, new TaskLibraryTemplateRenderer(), new FakeTeamsChatMetadataResolver(), CreateChatOptions())]),
             CreateChatOptions());
     }
 
@@ -303,5 +339,20 @@ public sealed class ChatAppExperimentTests
         public override DateTimeOffset GetUtcNow() => _now.ToUniversalTime();
 
         public override TimeZoneInfo LocalTimeZone => TimeZoneInfo.FindSystemTimeZoneById("Eastern Standard Time");
+    }
+
+    private sealed class FakeTeamsChatMetadataResolver : ITeamsChatMetadataResolver
+    {
+        private readonly IReadOnlyDictionary<string, string> _topics;
+
+        public FakeTeamsChatMetadataResolver(params (string ChatId, string Topic)[] topics)
+        {
+            _topics = topics.ToDictionary(topic => topic.ChatId, topic => topic.Topic, StringComparer.Ordinal);
+        }
+
+        public TeamsChatMetadata Resolve(string chatId) =>
+            _topics.TryGetValue(chatId, out var topic)
+                ? new TeamsChatMetadata(chatId, topic)
+                : new TeamsChatMetadata(chatId);
     }
 }

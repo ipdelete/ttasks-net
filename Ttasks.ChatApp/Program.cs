@@ -17,6 +17,7 @@ builder.Services.AddSingleton<ITaskStore>(services =>
 });
 builder.Services.AddSingleton<ITaskLibrary, StoreBackedTaskLibrary>();
 builder.Services.AddSingleton<TaskLibraryTemplateRenderer>();
+builder.Services.AddSingleton<ITeamsChatMetadataResolver, ShellTeamsChatMetadataResolver>();
 builder.Services.AddSingleton<TeamsCapabilityProvider>();
 builder.Services.AddSingleton<MailTodayCapabilityProvider>();
 builder.Services.AddSingleton<ICapabilityProvider>(services =>

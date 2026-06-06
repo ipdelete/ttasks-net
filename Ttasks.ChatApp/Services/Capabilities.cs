@@ -1,4 +1,5 @@
 using System.Text.RegularExpressions;
+using System.Text.Json;
 using System.Web;
 using System.Globalization;
 using Microsoft.Extensions.Options;
@@ -141,7 +142,8 @@ public sealed class StoreBackedTaskLibrary : ITaskLibrary
         if (existing.PayloadTemplate == definition.PayloadTemplate
             && existing.DisplayName == definition.DisplayName
             && existing.Description == definition.Description
-            && SameParameters(existing.Parameters, definition.Parameters))
+            && SameParameters(existing.Parameters, definition.Parameters)
+            && MetadataContains(existing.Metadata, definition.Metadata))
             return existing;
 
         var task = _store.Tasks.Get(existing.Id);
@@ -179,6 +181,20 @@ public sealed class StoreBackedTaskLibrary : ITaskLibrary
 
     private static bool IsNumber(object value) =>
         value is byte or sbyte or short or ushort or int or uint or long or ulong or float or double or decimal;
+
+    private static bool MetadataContains(IReadOnlyDictionary<string, object?> existing, IReadOnlyDictionary<string, object?> expected) =>
+        expected.All(entry => existing.TryGetValue(entry.Key, out var value) && SameMetadataValue(value, entry.Value));
+
+    private static bool SameMetadataValue(object? left, object? right)
+    {
+        if (left is IEnumerable<object?> leftList && right is IEnumerable<object?> rightList)
+            return leftList.SequenceEqual(rightList);
+
+        if (left is IEnumerable<string> leftStrings && right is IEnumerable<string> rightStrings)
+            return leftStrings.SequenceEqual(rightStrings);
+
+        return SameValue(left, right);
+    }
 
     private static CoreTask CreateTemplateTask(TaskLibraryDefinition definition, IReadOnlyDictionary<string, object?> metadata) =>
         definition.TaskType switch
@@ -297,20 +313,28 @@ public sealed partial class TeamsCapabilityProvider : ICapabilityProvider
     private static readonly Regex DirectChatIdPattern = new(@"(?<![A-Za-z0-9_.:-])(?<id>48:[A-Za-z0-9_.:-]+|19:[^\s<>,]+@thread\.(?:v2|tacv2))(?![A-Za-z0-9_.:-])", RegexOptions.IgnoreCase | RegexOptions.Compiled);
     private readonly ITaskLibrary _library;
     private readonly TaskLibraryTemplateRenderer _renderer;
+    private readonly ITeamsChatMetadataResolver _chatMetadata;
     private readonly ChatAppOptions _options;
 
-    public TeamsCapabilityProvider(ITaskLibrary library, TaskLibraryTemplateRenderer renderer, IOptions<ChatAppOptions> options)
+    public TeamsCapabilityProvider(ITaskLibrary library, TaskLibraryTemplateRenderer renderer, ITeamsChatMetadataResolver chatMetadata, IOptions<ChatAppOptions> options)
     {
         _library = library;
         _renderer = renderer;
+        _chatMetadata = chatMetadata;
         _options = options.Value;
     }
 
     public CapabilitySet GetCapabilities(CapabilityRequest request)
     {
-        var targets = ExtractTargets(request.UserMessage);
-        var capabilities = targets
-            .Select(target => ToCapability(_library.GetOrAdd(ToDefinition(target))))
+        var explicitTargets = ExtractTargets(request.UserMessage);
+        var itemsByKey = explicitTargets
+            .Select(target => _library.GetOrAdd(ToDefinition(target)))
+            .Concat(FindAliasMatches(request.UserMessage))
+            .GroupBy(item => item.Key, StringComparer.Ordinal)
+            .Select(group => group.First())
+            .ToList();
+        var capabilities = itemsByKey
+            .Select(ToCapability)
             .ToList();
 
         return new CapabilitySet(
@@ -332,16 +356,23 @@ public sealed partial class TeamsCapabilityProvider : ICapabilityProvider
 
     private TaskLibraryDefinition ToDefinition(string chatId)
     {
+        var chat = _chatMetadata.Resolve(chatId);
+        var title = string.IsNullOrWhiteSpace(chat.Topic) ? chatId : chat.Topic;
         var payloadTemplate = "teams read {chatId} -n {maxMessages} --json";
         var metadata = new Dictionary<string, object?>(StringComparer.Ordinal)
         {
             ["capabilityKind"] = "teams.read",
-            ["teamsChatId"] = chatId
+            ["teamsChatId"] = chatId,
+            ["teamsChatAliases"] = CreateAliases(title)
         };
+        if (!string.IsNullOrWhiteSpace(chat.Topic))
+            metadata["teamsChatTopic"] = chat.Topic;
+        if (!string.IsNullOrWhiteSpace(chat.Error))
+            metadata["teamsChatMetadataError"] = chat.Error;
 
         return new TaskLibraryDefinition(
             $"teams.chat.read:{chatId}",
-            $"Read Teams chat {chatId}",
+            $"Read Teams chat {title}",
             "Read messages from a user-provided Teams chat.",
             TaskType.Powershell,
             payloadTemplate,
@@ -350,6 +381,17 @@ public sealed partial class TeamsCapabilityProvider : ICapabilityProvider
                 new TemplateParameter("maxMessages", "default", DefaultValue: _options.MaxTeamsReadMessages)
             ],
             metadata);
+    }
+
+    private IEnumerable<TaskLibraryItem> FindAliasMatches(string userMessage)
+    {
+        var normalizedMessage = NormalizeAlias(userMessage);
+        if (string.IsNullOrWhiteSpace(normalizedMessage))
+            return [];
+
+        return _library.All()
+            .Where(item => item.Metadata.TryGetValue("capabilityKind", out var kind) && string.Equals(kind as string, "teams.read", StringComparison.Ordinal))
+            .Where(item => ReadAliases(item.Metadata).Any(alias => ContainsAlias(normalizedMessage, alias)));
     }
 
     private CommandCapability ToCapability(TaskLibraryItem item)
@@ -366,6 +408,71 @@ public sealed partial class TeamsCapabilityProvider : ICapabilityProvider
             item.TaskType,
             _renderer.Render(item),
             metadata);
+    }
+
+    internal static string NormalizeAlias(string value)
+    {
+        var normalized = AliasTokenPattern().Replace(value.ToLowerInvariant(), " ");
+        return WhitespacePattern().Replace(normalized, " ").Trim();
+    }
+
+    private static IReadOnlyList<string> CreateAliases(string value)
+    {
+        var alias = NormalizeAlias(value);
+        return string.IsNullOrWhiteSpace(alias) ? [] : [alias];
+    }
+
+    private static IReadOnlyList<string> ReadAliases(IReadOnlyDictionary<string, object?> metadata)
+    {
+        if (!metadata.TryGetValue("teamsChatAliases", out var raw))
+            return [];
+
+        if (raw is IEnumerable<object?> values)
+            return values.OfType<string>().Where(alias => !string.IsNullOrWhiteSpace(alias)).ToList();
+
+        if (raw is IEnumerable<string> strings)
+            return strings.Where(alias => !string.IsNullOrWhiteSpace(alias)).ToList();
+
+        return [];
+    }
+
+    private static bool ContainsAlias(string normalizedMessage, string alias) =>
+        normalizedMessage.Contains(alias, StringComparison.Ordinal);
+
+    [GeneratedRegex("[^\\p{L}\\p{Nd}]+")]
+    private static partial Regex AliasTokenPattern();
+
+    [GeneratedRegex("\\s+")]
+    private static partial Regex WhitespacePattern();
+}
+
+public sealed record TeamsChatMetadata(string ChatId, string? Topic = null, string? Error = null);
+
+public interface ITeamsChatMetadataResolver
+{
+    TeamsChatMetadata Resolve(string chatId);
+}
+
+public sealed class ShellTeamsChatMetadataResolver : ITeamsChatMetadataResolver
+{
+    public TeamsChatMetadata Resolve(string chatId)
+    {
+        try
+        {
+            var output = TaskExecutor.WithBuiltInHandlers()
+                .Execute(CoreTask.Powershell($"teams chat-get {chatId} --json", timeout: 10))
+                .Output;
+            if (string.IsNullOrWhiteSpace(output))
+                return new TeamsChatMetadata(chatId, Error: "teams chat-get returned no output.");
+
+            using var document = JsonDocument.Parse(output);
+            var topic = document.RootElement.TryGetProperty("topic", out var property) ? property.GetString() : null;
+            return new TeamsChatMetadata(chatId, topic);
+        }
+        catch (Exception ex) when (ex is InvalidOperationException or TaskExecutionException or JsonException)
+        {
+            return new TeamsChatMetadata(chatId, Error: ex.Message);
+        }
     }
 }
 
