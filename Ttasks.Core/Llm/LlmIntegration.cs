@@ -38,6 +38,9 @@ public sealed class LlmSessionOptions
     public string? WorkingDirectory { get; init; }
     public TimeSpan? Timeout { get; init; }
     public string PermissionPolicy { get; init; } = LlmPermissionPolicies.ApproveAll;
+    public SystemMessageConfig? SystemMessage { get; init; }
+    public string? OrganizationCustomInstructions { get; init; }
+    public bool? SkipCustomInstructions { get; init; }
     public IReadOnlyDictionary<string, object?> AdditionalOptions { get; init; } = new Dictionary<string, object?>();
 }
 
@@ -49,6 +52,9 @@ public sealed class LlmHandlerOptions
     public string? ReasoningEffort { get; init; }
     public string? WorkingDirectory { get; init; }
     public bool IncludeUpstreamResults { get; init; }
+    public SystemMessageConfig? SystemMessage { get; init; }
+    public string? OrganizationCustomInstructions { get; init; }
+    public bool? SkipCustomInstructions { get; init; }
     public IReadOnlyDictionary<string, object?> AdditionalOptions { get; init; } = new Dictionary<string, object?>();
 }
 
@@ -112,6 +118,9 @@ public static class CopilotHandlers
             PermissionPolicy = options.PermissionPolicy,
             ReasoningEffort = options.ReasoningEffort,
             WorkingDirectory = options.WorkingDirectory,
+            SystemMessage = options.SystemMessage,
+            OrganizationCustomInstructions = options.OrganizationCustomInstructions,
+            SkipCustomInstructions = options.SkipCustomInstructions,
             AdditionalOptions = options.AdditionalOptions
         });
         context.RaiseIfCancelled();
@@ -325,6 +334,45 @@ public sealed class LlmAgentSession : IDisposable, IAsyncDisposable
             throw new ArgumentException("Prompt must be non-empty.", nameof(prompt));
         CopilotHandlers.ValidateTimeout(timeout);
 
+        var request = new LlmTurnRequest
+        {
+            Prompt = prompt,
+            Model = Options.Model,
+            ToolsEnabled = true,
+            Timeout = timeout ?? Options.Timeout,
+            PermissionPolicy = Options.PermissionPolicy
+        };
+        return await SendAndWaitRequestAsync(request, cancellationToken).ConfigureAwait(false);
+    }
+
+    public Func<TaskContext, object?> PromptHandler(LlmHandlerOptions? options = null)
+    {
+        options ??= new LlmHandlerOptions();
+        var timeout = CopilotHandlers.ValidateTimeout(options.Timeout ?? Options.Timeout);
+        var permissionPolicy = options.PermissionPolicy == LlmPermissionPolicies.ApproveAll
+            ? Options.PermissionPolicy
+            : options.PermissionPolicy;
+
+        return context =>
+        {
+            var snapshot = GetStateSnapshot();
+            if (snapshot.State != LlmSessionState.SyncActive)
+                throw new InvalidOperationException("LLM prompt session handler requires a sync-active session.");
+
+            context.RaiseIfCancelled();
+            var request = CopilotHandlers.CreateRequest(
+                context,
+                Options.Model,
+                timeout,
+                toolsEnabled: false,
+                permissionPolicy: permissionPolicy,
+                includeUpstreamResults: options.IncludeUpstreamResults);
+            return SendAndWaitRequestAsync(request, context.CancellationToken).GetAwaiter().GetResult();
+        };
+    }
+
+    private async System.Threading.Tasks.Task<string> SendAndWaitRequestAsync(LlmTurnRequest request, CancellationToken cancellationToken = default)
+    {
         ILlmSession session;
         lock (_gate)
         {
@@ -336,14 +384,6 @@ public sealed class LlmAgentSession : IDisposable, IAsyncDisposable
         await _turns.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
-            var request = new LlmTurnRequest
-            {
-                Prompt = prompt,
-                Model = Options.Model,
-                ToolsEnabled = true,
-                Timeout = timeout ?? Options.Timeout,
-                PermissionPolicy = Options.PermissionPolicy
-            };
             var result = await CopilotHandlers.SendWithCancellationAsync(session, request, cancellationToken).ConfigureAwait(false);
             return CopilotHandlers.NormalizeText(result);
         }
@@ -483,6 +523,9 @@ internal sealed class CopilotSdkSession : ILlmSession
         {
             Model = _options.Model,
             ReasoningEffort = _options.ReasoningEffort,
+            SystemMessage = _options.SystemMessage,
+            OrganizationCustomInstructions = _options.OrganizationCustomInstructions,
+            SkipCustomInstructions = _options.SkipCustomInstructions,
             OnPermissionRequest = request.ToolsEnabled && _options.PermissionPolicy == LlmPermissionPolicies.ApproveAll ? PermissionHandler.ApproveAll : null,
             AvailableTools = request.ToolsEnabled ? null : []
         }).ConfigureAwait(false);

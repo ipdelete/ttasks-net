@@ -87,6 +87,7 @@ public sealed class Phase8LlmSessionConformanceTests
         session.Enter();
 
         var first = System.Threading.Tasks.Task.Run(() => session.SendAndWait("first"));
+        SpinWait.SpinUntil(() => provider.Requests.Count == 1, TimeSpan.FromSeconds(2));
         var second = System.Threading.Tasks.Task.Run(() => session.SendAndWait("second"));
         await System.Threading.Tasks.Task.WhenAll(first, second);
 
@@ -136,6 +137,59 @@ public sealed class Phase8LlmSessionConformanceTests
     }
 
     [Fact]
+    public void Shared_Session_Prompt_Handler_Is_Toolless_And_Reuses_Active_Session()
+    {
+        var provider = new RecordingLlmProvider();
+        provider.QueueResult(LlmTurnResult.Text("routed"));
+        provider.QueueResult(LlmTurnResult.Text("planned"));
+        var session = new LlmAgentSession(provider, new LlmSessionOptions { Model = "m", Timeout = TimeSpan.FromSeconds(5) });
+        var executor = new TaskExecutor();
+        executor.Register(TaskType.Prompt, session.PromptHandler());
+
+        Assert.Throws<InvalidOperationException>(() => executor.Execute(CoreTask.Prompt("before enter")));
+        session.Enter();
+        var route = executor.Execute(CoreTask.Prompt("route"));
+        var plan = executor.Execute(CoreTask.Prompt("plan", timeout: 2));
+        session.Exit();
+
+        Assert.Equal("routed", route.Output);
+        Assert.Equal("planned", plan.Output);
+        Assert.Equal(1, provider.CreatedSessions);
+        Assert.All(provider.Requests, request => Assert.False(request.ToolsEnabled));
+        Assert.Equal(new[] { "route", "plan" }, provider.Requests.Select(request => request.Prompt));
+        Assert.Equal(TimeSpan.FromSeconds(2), provider.Requests[1].Timeout);
+    }
+
+    [Fact]
+    public void Shared_Session_Prompt_Handler_Composes_Upstream_FanIn_When_Enabled()
+    {
+        var provider = new RecordingLlmProvider("summary");
+        var session = new LlmAgentSession(provider, new LlmSessionOptions { Model = "m" });
+        var executor = new TaskExecutor();
+        var first = RestoredSucceededTask("read-b", "B output");
+        var second = RestoredSucceededTask("read-a", "A output");
+        var summary = CoreTask.Prompt("Summarize upstream reads.");
+        executor.Register(TaskType.Prompt, session.PromptHandler(new LlmHandlerOptions { IncludeUpstreamResults = true }));
+        session.Enter();
+
+        executor.Execute(
+            summary,
+            upstream: new Dictionary<string, CoreTask>
+            {
+                [first.Id] = first,
+                [second.Id] = second
+            },
+            orderedUpstream: new[] { first, second });
+        session.Exit();
+
+        var request = provider.Requests.Single();
+        Assert.False(request.ToolsEnabled);
+        Assert.StartsWith("Instruction:\nSummarize upstream reads.\n\nUpstream results:\n", request.Prompt);
+        Assert.Contains("B output", request.Prompt, StringComparison.Ordinal);
+        Assert.Contains("A output", request.Prompt, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async System.Threading.Tasks.Task R_COP_18_Handler_Rejects_Async_Active_Session()
     {
         var provider = new RecordingLlmProvider("ok");
@@ -147,6 +201,30 @@ public sealed class Phase8LlmSessionConformanceTests
 
         Assert.Throws<InvalidOperationException>(() => executor.Execute(CoreTask.Agent("async-active")));
         await session.ExitAsync();
+    }
+
+    private static CoreTask RestoredSucceededTask(string id, string output)
+    {
+        var now = DateTimeOffset.Parse("2026-01-01T00:00:00.0000000+00:00");
+        return CoreTask.Restore(
+            id,
+            TaskType.Powershell,
+            "payload",
+            id,
+            "",
+            null,
+            TaskState.Succeeded,
+            null,
+            null,
+            now,
+            new TaskResult
+            {
+                TaskId = id,
+                Status = TaskState.Succeeded,
+                StartedAt = now,
+                FinishedAt = now,
+                Output = output
+            });
     }
 
     [Fact]

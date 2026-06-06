@@ -1,3 +1,4 @@
+using GitHub.Copilot;
 using Ttasks.Core;
 
 namespace Ttasks.Tests;
@@ -98,6 +99,31 @@ public sealed class Phase8LlmHandlerConformanceTests
     }
 
     [Fact]
+    public void Prompt_Handler_Passes_Session_System_Message_Options_To_Provider()
+    {
+        var provider = new RecordingLlmProvider("ok");
+        var systemMessage = new SystemMessageConfig
+        {
+            Mode = SystemMessageMode.Replace,
+            Content = "system"
+        };
+        var executor = new TaskExecutor();
+        executor.Register(TaskType.Prompt, CopilotHandlers.MakePromptHandler(provider, new LlmHandlerOptions
+        {
+            SystemMessage = systemMessage,
+            OrganizationCustomInstructions = "org",
+            SkipCustomInstructions = true
+        }));
+
+        executor.Execute(CoreTask.Prompt("prompt"));
+
+        var options = provider.Sessions.Single().Options;
+        Assert.Same(systemMessage, options.SystemMessage);
+        Assert.Equal("org", options.OrganizationCustomInstructions);
+        Assert.True(options.SkipCustomInstructions);
+    }
+
+    [Fact]
     public void R_COP_07_Task_Timeout_Overrides_Handler_Default()
     {
         var provider = new RecordingLlmProvider("ok");
@@ -140,4 +166,3 @@ public sealed class Phase8LlmHandlerConformanceTests
         Assert.Equal("handler", prompt.Result?.TerminationReason);
     }
 }
-

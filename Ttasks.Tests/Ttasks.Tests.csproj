@@ -22,6 +22,7 @@
 
   <ItemGroup>
     <ProjectReference Include="..\Ttasks.Core\Ttasks.Core.csproj" />
+    <ProjectReference Include="..\Ttasks.ChatApp\Ttasks.ChatApp.csproj" />
   </ItemGroup>
 
 </Project>

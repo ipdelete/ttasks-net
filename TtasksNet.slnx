@@ -1,4 +1,5 @@
 <Solution>
+  <Project Path="Ttasks.ChatApp/Ttasks.ChatApp.csproj" />
   <Project Path="Ttasks.Core/Ttasks.Core.csproj" />
   <Project Path="Ttasks.Tests/Ttasks.Tests.csproj" />
 </Solution>
