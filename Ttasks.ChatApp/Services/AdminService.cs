@@ -80,6 +80,85 @@ public sealed class AdminService
                 item.Metadata))
             .ToList();
 
+    public IReadOnlyList<AdminCapabilityItem> Capabilities() =>
+        [
+            new AdminCapabilityItem(
+                "teams.read",
+                "Read Teams chat",
+                "Read messages from a Teams chat and make the JSON output available to a graph.",
+                "powershell",
+                "fixed-template",
+                "Available when the user provides an explicit Teams chat URL/ID or references a previously saved chat alias.",
+                "Creates or reuses task-library items keyed as teams.chat.read:<chat-id>; saved items include chat metadata and aliases when Teams metadata can be resolved.",
+                [
+                    "read https://teams.microsoft.com/l/chat/<chat-id>/conversations",
+                    "read 19:<chat-id>@thread.v2",
+                    "read teams chat aet swe chat"
+                ]),
+            new AdminCapabilityItem(
+                "mail",
+                "Use mail CLI",
+                "Use the full mail CLI surface from mail --help to create reusable task-library templates.",
+                "powershell",
+                "full-tool",
+                "Available when the user asks about mail, email, messages, or the inbox.",
+                "The LLM reads mail --help, proposes task-library templates, and the host stores accepted templates for reuse. The host still requires a single mail command with no shell chaining.",
+                [
+                    "how many emails did I get today",
+                    "find unread mail from Kent",
+                    "read messages about deploy"
+                ]),
+            new AdminCapabilityItem(
+                "calendar.today",
+                "Read today's calendar",
+                "List today's calendar events and make event JSON available to a graph.",
+                "powershell",
+                "fixed-template",
+                "Available when the user asks for today's calendar, schedule, events, or meetings.",
+                "Creates or reuses the calendar.today task-library item; the date range is rendered from the host clock at execution planning time.",
+                [
+                    "read today's calendar",
+                    "summarize my schedule today",
+                    "what meetings do I have today"
+                ]),
+            new AdminCapabilityItem(
+                "az.account.list",
+                "List Azure subscriptions",
+                "List accessible Azure subscriptions as JSON.",
+                "powershell",
+                "limited-tool",
+                "Available when the user asks for Azure subscriptions or accounts.",
+                "Creates or reuses the az.account.list task-library item with a fixed read-only az account list command.",
+                [
+                    "list azure subscriptions",
+                    "show az accounts"
+                ]),
+            new AdminCapabilityItem(
+                "az.group.list",
+                "List Azure resource groups",
+                "List Azure resource groups in the active subscription as JSON.",
+                "powershell",
+                "limited-tool",
+                "Available when the user asks for Azure resource groups.",
+                "Creates or reuses the az.group.list task-library item with a fixed read-only az group list command.",
+                [
+                    "list azure resource groups",
+                    "show az rgs"
+                ]),
+            new AdminCapabilityItem(
+                "az.resource.list",
+                "List Azure resources",
+                "List Azure resources in the active subscription as JSON.",
+                "powershell",
+                "limited-tool",
+                "Available when the user asks for Azure resources, excluding resource-group-only requests.",
+                "Creates or reuses the az.resource.list task-library item with a fixed read-only az resource list command.",
+                [
+                    "list azure resources",
+                    "summarize az resources"
+                ])
+        ];
+
     private static AdminGraphSummary ToSummary(TaskGraph graph)
     {
         var tasks = graph.Members;

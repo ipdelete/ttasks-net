@@ -18,10 +18,22 @@ public sealed record CommandCapability(
     string Payload,
     IReadOnlyDictionary<string, object?> Metadata);
 
+public sealed record ToolCapability(
+    string Kind,
+    string ToolName,
+    string DisplayName,
+    string Description,
+    string Policy,
+    string Documentation,
+    IReadOnlyDictionary<string, object?> Metadata);
+
 public sealed record CapabilitySet(
     IReadOnlyList<CommandCapability> Capabilities,
-    string EmptyMessage)
+    string EmptyMessage,
+    IReadOnlyList<ToolCapability>? ToolCapabilities = null)
 {
+    public IReadOnlyList<ToolCapability> Tools { get; } = ToolCapabilities ?? [];
+
     private readonly Lazy<IReadOnlyDictionary<string, CommandCapability>> _byId = new(
         () => Capabilities.ToDictionary(capability => capability.Id, StringComparer.Ordinal));
 
@@ -44,14 +56,21 @@ public sealed class CompositeCapabilityProvider : ICapabilityProvider
 
     public CapabilitySet GetCapabilities(CapabilityRequest request)
     {
-        var capabilities = _providers
-            .SelectMany(provider => provider.GetCapabilities(request).Capabilities)
+        var sets = _providers
+            .Select(provider => provider.GetCapabilities(request))
+            .ToList();
+        var capabilities = sets
+            .SelectMany(set => set.Capabilities)
             .Select((capability, index) => Renumber(capability, index))
+            .ToList();
+        var tools = sets
+            .SelectMany(set => set.Tools)
             .ToList();
 
         return new CapabilitySet(
             capabilities,
-            "I can plan action graphs only from host-approved capabilities. This turn did not include a supported Teams chat/channel ID/link or a supported mail request.");
+            "I can plan action graphs only from host-approved capabilities. This turn did not include a supported Teams chat/channel ID/link, mail request, calendar request, or Azure inventory request.",
+            tools);
     }
 
     private static CommandCapability Renumber(CommandCapability capability, int index)
@@ -96,6 +115,22 @@ public interface ITaskLibrary
 {
     TaskLibraryItem GetOrAdd(TaskLibraryDefinition definition);
     IReadOnlyList<TaskLibraryItem> All();
+}
+
+public interface IToolDocumentationProvider
+{
+    string GetHelp(string toolName);
+}
+
+public sealed class ShellToolDocumentationProvider : IToolDocumentationProvider
+{
+    public string GetHelp(string toolName)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(toolName);
+        return TaskExecutor.WithBuiltInHandlers()
+            .Execute(CoreTask.Powershell($"{toolName} --help", timeout: 10))
+            .Output;
+    }
 }
 
 public sealed class StoreBackedTaskLibrary : ITaskLibrary
@@ -476,13 +511,55 @@ public sealed class ShellTeamsChatMetadataResolver : ITeamsChatMetadataResolver
     }
 }
 
-public sealed partial class MailTodayCapabilityProvider : ICapabilityProvider
+public sealed partial class MailToolCapabilityProvider : ICapabilityProvider
 {
-    private static readonly Regex TodayMailPattern = new(@"\b(today'?s|todays)\s+(mail|email)\b|\b(mail|email)\s+(today|from today)\b", RegexOptions.IgnoreCase | RegexOptions.Compiled);
+    private static readonly Regex MailPattern = new(@"\b(mail|email|emails|message|messages|inbox)\b", RegexOptions.IgnoreCase | RegexOptions.Compiled);
+    private readonly IToolDocumentationProvider _documentation;
+
+    public MailToolCapabilityProvider(IToolDocumentationProvider documentation)
+    {
+        _documentation = documentation;
+    }
+
+    public CapabilitySet GetCapabilities(CapabilityRequest request)
+    {
+        if (!MailPattern.IsMatch(request.UserMessage))
+        {
+            return new CapabilitySet(
+                [],
+                "I can expose the mail tool when the request asks about mail, email, messages, or the inbox.");
+        }
+
+        var metadata = new Dictionary<string, object?>(StringComparer.Ordinal)
+        {
+            ["capabilityKind"] = "mail",
+            ["capabilityPolicy"] = "full",
+            ["toolName"] = "mail"
+        };
+
+        return new CapabilitySet(
+            [],
+            "I can expose the mail tool when the request asks about mail, email, messages, or the inbox.",
+            [
+                new ToolCapability(
+                    "mail",
+                    "mail",
+                    "Use mail CLI",
+                    "Use the full mail CLI surface based on mail --help to create or reuse task-library items.",
+                    "full",
+                    _documentation.GetHelp("mail"),
+                    metadata)
+            ]);
+    }
+}
+
+public sealed partial class CalendarTodayCapabilityProvider : ICapabilityProvider
+{
+    private static readonly Regex TodayCalendarPattern = new(@"\b(today'?s|todays)\s+(calendar|schedule|events|meetings)\b|\b(calendar|schedule|events|meetings)\s+(today|for today)\b", RegexOptions.IgnoreCase | RegexOptions.Compiled);
     private readonly ITaskLibrary _library;
     private readonly TaskLibraryTemplateRenderer _renderer;
 
-    public MailTodayCapabilityProvider(ITaskLibrary library, TaskLibraryTemplateRenderer renderer)
+    public CalendarTodayCapabilityProvider(ITaskLibrary library, TaskLibraryTemplateRenderer renderer)
     {
         _library = library;
         _renderer = renderer;
@@ -490,11 +567,11 @@ public sealed partial class MailTodayCapabilityProvider : ICapabilityProvider
 
     public CapabilitySet GetCapabilities(CapabilityRequest request)
     {
-        if (!TodayMailPattern.IsMatch(request.UserMessage))
+        if (!TodayCalendarPattern.IsMatch(request.UserMessage))
         {
             return new CapabilitySet(
                 [],
-                "I can expose today's mail when the request asks for today's mail or email.");
+                "I can expose today's calendar when the request asks for today's calendar, schedule, events, or meetings.");
         }
 
         var item = _library.GetOrAdd(ToDefinition());
@@ -513,27 +590,116 @@ public sealed partial class MailTodayCapabilityProvider : ICapabilityProvider
                     _renderer.Render(item),
                     metadata)
             ],
-            "I can expose today's mail when the request asks for today's mail or email.");
+            "I can expose today's calendar when the request asks for today's calendar, schedule, events, or meetings.");
     }
 
     private static TaskLibraryDefinition ToDefinition()
     {
         var metadata = new Dictionary<string, object?>(StringComparer.Ordinal)
         {
-            ["capabilityKind"] = "mail.today"
+            ["capabilityKind"] = "calendar.today"
         };
 
         return new TaskLibraryDefinition(
-            "mail.today",
-            "Read today's mail",
-            "Search mail received today and return recent messages as JSON.",
+            "calendar.today",
+            "Read today's calendar",
+            "List calendar events for today and return them as JSON.",
             TaskType.Powershell,
-            "mail search --query '?$filter=receivedDateTime ge {today:yyyy-MM-dd}T00:00:00Z and receivedDateTime lt {tomorrow:yyyy-MM-dd}T00:00:00Z&$orderby=receivedDateTime desc&$top={top}' --json",
+            "calendar list -s {today:yyyy-MM-dd}T00:00:00 -e {tomorrow:yyyy-MM-dd}T00:00:00 -n {top} --json",
             [
                 new TemplateParameter("today", "clock.now"),
                 new TemplateParameter("tomorrow", "clock.tomorrow"),
-                new TemplateParameter("top", "default", DefaultValue: 3)
+                new TemplateParameter("top", "default", DefaultValue: 10)
             ],
+            metadata);
+    }
+}
+
+public sealed partial class AzureInventoryCapabilityProvider : ICapabilityProvider
+{
+    private static readonly Regex AzurePattern = new(@"\b(az|azure)\b", RegexOptions.IgnoreCase | RegexOptions.Compiled);
+    private static readonly Regex SubscriptionPattern = new(@"\b(subscriptions?|accounts?)\b", RegexOptions.IgnoreCase | RegexOptions.Compiled);
+    private static readonly Regex ResourceGroupPattern = new(@"\bresource\s+groups?\b|\brgs?\b", RegexOptions.IgnoreCase | RegexOptions.Compiled);
+    private static readonly Regex ResourcePattern = new(@"\bresources?\b", RegexOptions.IgnoreCase | RegexOptions.Compiled);
+    private readonly ITaskLibrary _library;
+    private readonly TaskLibraryTemplateRenderer _renderer;
+
+    public AzureInventoryCapabilityProvider(ITaskLibrary library, TaskLibraryTemplateRenderer renderer)
+    {
+        _library = library;
+        _renderer = renderer;
+    }
+
+    public CapabilitySet GetCapabilities(CapabilityRequest request)
+    {
+        if (!AzurePattern.IsMatch(request.UserMessage))
+        {
+            return new CapabilitySet(
+                [],
+                "I can expose read-only Azure inventory for subscriptions, resource groups, and resources.");
+        }
+
+        var definitions = MatchingDefinitions(request.UserMessage).ToList();
+        if (definitions.Count == 0)
+        {
+            return new CapabilitySet(
+                [],
+                "I can expose read-only Azure inventory when the request asks for Azure subscriptions, resource groups, or resources.");
+        }
+
+        var capabilities = definitions
+            .Select(definition => _library.GetOrAdd(definition))
+            .Select(ToCapability)
+            .ToList();
+
+        return new CapabilitySet(
+            capabilities,
+            "I can expose read-only Azure inventory when the request asks for Azure subscriptions, resource groups, or resources.");
+    }
+
+    private static IEnumerable<TaskLibraryDefinition> MatchingDefinitions(string userMessage)
+    {
+        if (SubscriptionPattern.IsMatch(userMessage))
+            yield return ToDefinition("az.account.list", "List Azure subscriptions", "List accessible Azure subscriptions as JSON.", "az account list --only-show-errors --output json");
+
+        var wantsResourceGroups = ResourceGroupPattern.IsMatch(userMessage);
+        if (wantsResourceGroups)
+            yield return ToDefinition("az.group.list", "List Azure resource groups", "List Azure resource groups in the active subscription as JSON.", "az group list --only-show-errors --output json");
+
+        if (ResourcePattern.IsMatch(userMessage) && !wantsResourceGroups)
+            yield return ToDefinition("az.resource.list", "List Azure resources", "List Azure resources in the active subscription as JSON.", "az resource list --only-show-errors --output json");
+    }
+
+    private CommandCapability ToCapability(TaskLibraryItem item)
+    {
+        var metadata = new Dictionary<string, object?>(item.Metadata, StringComparer.Ordinal)
+        {
+            ["libraryTaskId"] = item.Id
+        };
+
+        return new CommandCapability(
+            "pending",
+            item.DisplayName,
+            item.Description,
+            item.TaskType,
+            _renderer.Render(item),
+            metadata);
+    }
+
+    private static TaskLibraryDefinition ToDefinition(string key, string displayName, string description, string payload)
+    {
+        var metadata = new Dictionary<string, object?>(StringComparer.Ordinal)
+        {
+            ["capabilityKind"] = key
+        };
+
+        return new TaskLibraryDefinition(
+            key,
+            displayName,
+            description,
+            TaskType.Powershell,
+            payload,
+            [],
             metadata);
     }
 }

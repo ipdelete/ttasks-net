@@ -48,6 +48,10 @@ public sealed class GraphPlanBuilder
             metadata["libraryTaskId"] = libraryTaskId;
         if (capability.Metadata.TryGetValue("capabilityKind", out var kind))
             metadata["capabilityKind"] = kind;
+        if (capability.Metadata.TryGetValue("capabilityPolicy", out var policy))
+            metadata["capabilityPolicy"] = policy;
+        if (capability.Metadata.TryGetValue("toolName", out var toolName))
+            metadata["toolName"] = toolName;
 
         foreach (var entry in task.Metadata ?? new Dictionary<string, object?>())
             metadata[entry.Key] = entry.Value;

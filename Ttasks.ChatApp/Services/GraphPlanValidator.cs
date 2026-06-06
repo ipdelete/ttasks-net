@@ -71,16 +71,26 @@ public sealed partial class GraphPlanValidator
         if (capability.TaskType != TaskType.Powershell)
             throw new ArgumentException($"Task '{task.Id}' type does not match capability '{capability.Id}'.");
 
-        if (capability.Metadata.TryGetValue("capabilityKind", out var kind)
-            && string.Equals(kind as string, "teams.read", StringComparison.Ordinal)
-            && !TeamsReadPattern().IsMatch(capability.Payload)
-            && !TeamsReadChannelPattern().IsMatch(capability.Payload))
-            throw new ArgumentException($"Capability '{capability.Id}' does not resolve to a valid Teams read command.");
+        if (capability.Metadata.TryGetValue("capabilityKind", out var rawKind) && rawKind is string kind)
+            ValidateCapabilityPayload(capability, kind);
+    }
 
-        if (capability.Metadata.TryGetValue("capabilityKind", out kind)
-            && string.Equals(kind as string, "mail.today", StringComparison.Ordinal)
-            && !MailTodayPattern().IsMatch(capability.Payload))
-            throw new ArgumentException($"Capability '{capability.Id}' does not resolve to a valid mail search command.");
+    private static void ValidateCapabilityPayload(CommandCapability capability, string kind)
+    {
+        var isValid = kind switch
+        {
+            "teams.read" => TeamsReadPattern().IsMatch(capability.Payload) || TeamsReadChannelPattern().IsMatch(capability.Payload),
+            "mail" => MailToolPattern().IsMatch(capability.Payload) && IsSingleCommand(capability.Payload),
+            "mail.today" => MailTodayPattern().IsMatch(capability.Payload),
+            "calendar.today" => CalendarTodayPattern().IsMatch(capability.Payload),
+            "az.account.list" => capability.Payload == "az account list --only-show-errors --output json",
+            "az.group.list" => capability.Payload == "az group list --only-show-errors --output json",
+            "az.resource.list" => capability.Payload == "az resource list --only-show-errors --output json",
+            _ => throw new ArgumentException($"Capability '{capability.Id}' has unsupported kind '{kind}'.")
+        };
+
+        if (!isValid)
+            throw new ArgumentException($"Capability '{capability.Id}' does not resolve to a valid '{kind}' command.");
     }
 
     private static void EnsureAcyclic(GraphPlan plan)
@@ -123,4 +133,17 @@ public sealed partial class GraphPlanValidator
 
     [GeneratedRegex("^mail search --query '\\?\\$filter=receivedDateTime ge \\d{4}-\\d{2}-\\d{2}T00:00:00Z and receivedDateTime lt \\d{4}-\\d{2}-\\d{2}T00:00:00Z&\\$orderby=receivedDateTime desc&\\$top=\\d+' --json$")]
     private static partial Regex MailTodayPattern();
+
+    [GeneratedRegex("^mail(\\s+.+)?$")]
+    private static partial Regex MailToolPattern();
+
+    [GeneratedRegex("^calendar list -s \\d{4}-\\d{2}-\\d{2}T00:00:00 -e \\d{4}-\\d{2}-\\d{2}T00:00:00 -n \\d+ --json$")]
+    private static partial Regex CalendarTodayPattern();
+
+    private static bool IsSingleCommand(string payload) =>
+        !payload.Contains('\n')
+        && !payload.Contains('\r')
+        && !payload.Contains("&&", StringComparison.Ordinal)
+        && !payload.Contains('|')
+        && !payload.Contains(';');
 }

@@ -45,6 +45,18 @@ public sealed record GraphPlanEdge(string From, string To);
 
 public sealed record TeamsReadScope(IReadOnlySet<string> AllowedCommands);
 
+public sealed record ToolTaskProposalSet(IReadOnlyList<ToolTaskProposal> Tasks);
+
+public sealed record ToolTaskProposal(
+    string Key,
+    string DisplayName,
+    string Description,
+    string Type,
+    string PayloadTemplate,
+    IReadOnlyList<TemplateParameter>? Parameters = null,
+    IReadOnlyDictionary<string, object?>? Metadata = null,
+    string? ToolCapabilityKind = null);
+
 public sealed record AdminTaskLibraryItem(
     string Id,
     string Key,
@@ -54,6 +66,16 @@ public sealed record AdminTaskLibraryItem(
     string PayloadTemplate,
     DateTimeOffset CreatedAt,
     IReadOnlyDictionary<string, object?> Metadata);
+
+public sealed record AdminCapabilityItem(
+    string Kind,
+    string DisplayName,
+    string Description,
+    string Type,
+    string Policy,
+    string Availability,
+    string TaskLibraryBehavior,
+    IReadOnlyList<string> Examples);
 
 public sealed record AdminGraphSummary(
     string Id,

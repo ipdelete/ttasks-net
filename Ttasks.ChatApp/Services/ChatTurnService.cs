@@ -14,6 +14,8 @@ public sealed class ChatTurnService
     private readonly ChatSessionRegistry _sessions;
     private readonly ITaskStore _store;
     private readonly ICapabilityProvider _capabilities;
+    private readonly ITaskLibrary _library;
+    private readonly TaskLibraryTemplateRenderer _renderer;
     private readonly ChatAppOptions _options;
 
     public ChatTurnService(
@@ -23,6 +25,8 @@ public sealed class ChatTurnService
         ChatSessionRegistry sessions,
         ITaskStore store,
         ICapabilityProvider capabilities,
+        ITaskLibrary library,
+        TaskLibraryTemplateRenderer renderer,
         IOptions<ChatAppOptions> options)
     {
         _provider = provider;
@@ -31,6 +35,8 @@ public sealed class ChatTurnService
         _sessions = sessions;
         _store = store;
         _capabilities = capabilities;
+        _library = library;
+        _renderer = renderer;
         _options = options.Value;
     }
 
@@ -49,6 +55,10 @@ public sealed class ChatTurnService
             throw new InvalidOperationException($"Unknown route mode '{route.Mode}'.");
 
         var capabilities = _capabilities.GetCapabilities(new CapabilityRequest(activeSessionId, userMessage));
+        if (capabilities.Capabilities.Count == 0 && capabilities.Tools.Count == 0)
+            return new ChatResponse("answer", capabilities.EmptyMessage, activeSessionId);
+        if (capabilities.Tools.Count > 0)
+            capabilities = MaterializeToolCapabilities(executor, capabilities, route.PlanIntent ?? userMessage);
         if (capabilities.Capabilities.Count == 0)
             return new ChatResponse("answer", capabilities.EmptyMessage, activeSessionId);
 
@@ -172,6 +182,127 @@ public sealed class ChatTurnService
         {{FormatCapabilityCatalog(capabilities)}}
         """;
 
+    private CapabilitySet MaterializeToolCapabilities(TaskExecutor executor, CapabilitySet capabilities, string planIntent)
+    {
+        var proposalJson = executor.Execute(CoreTask.Prompt(CreateToolAuthoringPrompt(planIntent, capabilities.Tools))).Output;
+        var proposals = ParseJson<ToolTaskProposalSet>(proposalJson);
+        var toolByKind = capabilities.Tools.ToDictionary(tool => tool.Kind, StringComparer.Ordinal);
+        var authored = proposals.Tasks
+            .Select(proposal => ToCommandCapability(proposal, toolByKind))
+            .ToList();
+        var combined = capabilities.Capabilities.Concat(authored)
+            .Select((capability, index) => Renumber(capability, index))
+            .ToList();
+
+        return new CapabilitySet(combined, capabilities.EmptyMessage, capabilities.Tools);
+    }
+
+    private CommandCapability ToCommandCapability(ToolTaskProposal proposal, IReadOnlyDictionary<string, ToolCapability> toolByKind)
+    {
+        var toolKind = string.IsNullOrWhiteSpace(proposal.ToolCapabilityKind)
+            ? toolByKind.Keys.SingleOrDefault()
+            : proposal.ToolCapabilityKind;
+        if (string.IsNullOrWhiteSpace(toolKind) || !toolByKind.TryGetValue(toolKind, out var tool))
+            throw new InvalidOperationException($"Tool task proposal '{proposal.Key}' references an unavailable tool capability.");
+
+        ValidateToolProposal(proposal, tool);
+
+        var metadata = new Dictionary<string, object?>(proposal.Metadata ?? new Dictionary<string, object?>(), StringComparer.Ordinal)
+        {
+            ["capabilityKind"] = tool.Kind,
+            ["capabilityPolicy"] = tool.Policy,
+            ["toolName"] = tool.ToolName,
+            ["authoredFromToolCapability"] = true
+        };
+        var definition = new TaskLibraryDefinition(
+            proposal.Key,
+            proposal.DisplayName,
+            proposal.Description,
+            TaskType.Powershell,
+            proposal.PayloadTemplate,
+            proposal.Parameters ?? [],
+            metadata);
+        var item = _library.GetOrAdd(definition);
+        metadata = new Dictionary<string, object?>(item.Metadata, StringComparer.Ordinal)
+        {
+            ["libraryTaskId"] = item.Id
+        };
+
+        return new CommandCapability(
+            "pending",
+            item.DisplayName,
+            item.Description,
+            item.TaskType,
+            _renderer.Render(item),
+            metadata);
+    }
+
+    private static void ValidateToolProposal(ToolTaskProposal proposal, ToolCapability tool)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(proposal.Key);
+        ArgumentException.ThrowIfNullOrWhiteSpace(proposal.DisplayName);
+        ArgumentException.ThrowIfNullOrWhiteSpace(proposal.PayloadTemplate);
+        if (!string.Equals(proposal.Type, "powershell", StringComparison.OrdinalIgnoreCase))
+            throw new InvalidOperationException($"Tool task proposal '{proposal.Key}' must use powershell.");
+        if (!string.Equals(tool.Policy, "full", StringComparison.Ordinal))
+            throw new InvalidOperationException($"Tool capability '{tool.Kind}' does not allow LLM-authored templates.");
+        if (!IsSingleToolCommand(proposal.PayloadTemplate, tool.ToolName))
+            throw new InvalidOperationException($"Tool task proposal '{proposal.Key}' must invoke only the '{tool.ToolName}' tool.");
+    }
+
+    private static bool IsSingleToolCommand(string payloadTemplate, string toolName)
+    {
+        var trimmed = payloadTemplate.Trim();
+        if (!trimmed.Equals(toolName, StringComparison.Ordinal) && !trimmed.StartsWith(toolName + " ", StringComparison.Ordinal))
+            return false;
+        return !trimmed.Contains('\n')
+            && !trimmed.Contains('\r')
+            && !trimmed.Contains("&&", StringComparison.Ordinal)
+            && !trimmed.Contains('|')
+            && !trimmed.Contains(';');
+    }
+
+    private string CreateToolAuthoringPrompt(string planIntent, IReadOnlyList<ToolCapability> tools) =>
+        $$"""
+        Create task-library templates for the user's requested tool work.
+
+        Intent:
+        {{planIntent}}
+
+        Return JSON only. Do not wrap it in Markdown.
+
+        Schema:
+        {
+          "tasks": [
+            {
+              "key": "stable.semantic.key",
+              "displayName": "short user-facing name",
+              "description": "what this task does",
+              "type": "powershell",
+              "payloadTemplate": "single CLI command template",
+              "toolCapabilityKind": "matching tool capability kind",
+              "parameters": [
+                { "name": "today", "source": "clock.now" },
+                { "name": "tomorrow", "source": "clock.tomorrow" },
+                { "name": "top", "source": "default", "defaultValue": 10 }
+              ],
+              "metadata": { "purpose": "search" }
+            }
+          ]
+        }
+
+        Rules:
+        - Create the minimum task templates needed for this intent.
+        - Payload templates must invoke exactly one listed tool and must not use pipes, command chaining, or shell metacharacters.
+        - Use the tool documentation below to choose commands and flags.
+        - You may use template tokens such as {today:yyyy-MM-dd}, {tomorrow:yyyy-MM-dd}, and default parameters when useful.
+        - For date-based mail searches, prefer raw OData queries and JSON output.
+        - Use stable keys because accepted templates are saved in the task library for reuse.
+
+        Tool capabilities:
+        {{FormatToolCatalog(tools)}}
+        """;
+
     private static T ParseJson<T>(string text)
     {
         var json = ExtractJson(text);
@@ -219,4 +350,28 @@ public sealed class ChatTurnService
                 description = capability.Description
             }),
             new JsonSerializerOptions(JsonSerializerDefaults.Web) { WriteIndented = true });
+
+    private static string FormatToolCatalog(IReadOnlyList<ToolCapability> tools) =>
+        JsonSerializer.Serialize(
+            tools.Select(tool => new
+            {
+                kind = tool.Kind,
+                toolName = tool.ToolName,
+                displayName = tool.DisplayName,
+                description = tool.Description,
+                policy = tool.Policy,
+                documentation = tool.Documentation
+            }),
+            new JsonSerializerOptions(JsonSerializerDefaults.Web) { WriteIndented = true });
+
+    private static CommandCapability Renumber(CommandCapability capability, int index)
+    {
+        var id = $"cap-{index + 1}";
+        var metadata = new Dictionary<string, object?>(capability.Metadata, StringComparer.Ordinal)
+        {
+            ["capabilityId"] = id
+        };
+
+        return capability with { Id = id, Metadata = metadata };
+    }
 }

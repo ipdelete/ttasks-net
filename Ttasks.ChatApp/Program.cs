@@ -17,14 +17,19 @@ builder.Services.AddSingleton<ITaskStore>(services =>
 });
 builder.Services.AddSingleton<ITaskLibrary, StoreBackedTaskLibrary>();
 builder.Services.AddSingleton<TaskLibraryTemplateRenderer>();
+builder.Services.AddSingleton<IToolDocumentationProvider, ShellToolDocumentationProvider>();
 builder.Services.AddSingleton<ITeamsChatMetadataResolver, ShellTeamsChatMetadataResolver>();
 builder.Services.AddSingleton<TeamsCapabilityProvider>();
-builder.Services.AddSingleton<MailTodayCapabilityProvider>();
+builder.Services.AddSingleton<MailToolCapabilityProvider>();
+builder.Services.AddSingleton<CalendarTodayCapabilityProvider>();
+builder.Services.AddSingleton<AzureInventoryCapabilityProvider>();
 builder.Services.AddSingleton<ICapabilityProvider>(services =>
     new CompositeCapabilityProvider(
     [
         services.GetRequiredService<TeamsCapabilityProvider>(),
-        services.GetRequiredService<MailTodayCapabilityProvider>()
+        services.GetRequiredService<MailToolCapabilityProvider>(),
+        services.GetRequiredService<CalendarTodayCapabilityProvider>(),
+        services.GetRequiredService<AzureInventoryCapabilityProvider>()
     ]));
 builder.Services.AddSingleton<GraphPlanValidator>();
 builder.Services.AddSingleton<GraphPlanBuilder>();
@@ -102,6 +107,8 @@ app.MapPost("/api/chat", (ChatRequest request, ChatTurnService chat) =>
 });
 
 app.MapGet("/admin", () => Results.Content(AdminPage(), "text/html"));
+app.MapGet("/admin/capabilities", () => Results.Content(CapabilitiesPage(), "text/html"));
+app.MapGet("/admin/library", () => Results.Content(TaskLibraryPage(), "text/html"));
 
 app.MapGet("/api/admin/graphs", (AdminService admin, int? limit) =>
 {
@@ -110,6 +117,8 @@ app.MapGet("/api/admin/graphs", (AdminService admin, int? limit) =>
 });
 
 app.MapGet("/api/admin/library", (AdminService admin) => Results.Ok(admin.TaskLibrary()));
+
+app.MapGet("/api/admin/capabilities", (AdminService admin) => Results.Ok(admin.Capabilities()));
 
 app.MapGet("/api/admin/graphs/{id}", (string id, AdminService admin) =>
 {
@@ -162,6 +171,8 @@ static string AdminPage() =>
         }
         body { font-family: system-ui, sans-serif; margin: 0; }
         header { border-bottom: 1px solid var(--border); padding: 1rem; display: flex; justify-content: space-between; align-items: center; }
+        nav { display: flex; gap: .75rem; margin-top: .5rem; }
+        nav a { color: inherit; }
         main { display: grid; grid-template-columns: 320px minmax(360px, 1fr) 420px; min-height: calc(100vh - 65px); }
         section { border-right: 1px solid var(--border); padding: 1rem; overflow: auto; }
         section:last-child { border-right: 0; }
@@ -194,6 +205,11 @@ static string AdminPage() =>
         <div>
           <h1>ttasks admin</h1>
           <div class="muted">Persisted graph and task runs</div>
+          <nav>
+            <strong>Graphs and tasks</strong>
+            <a href="/admin/capabilities">Capabilities</a>
+            <a href="/admin/library">Task library</a>
+          </nav>
         </div>
         <button id="refresh">Refresh</button>
       </header>
@@ -201,8 +217,6 @@ static string AdminPage() =>
         <section>
           <h2>Graphs</h2>
           <div id="graphs" class="list"></div>
-          <h2 style="margin-top:1rem">Task library</h2>
-          <div id="library" class="list"></div>
         </section>
         <section>
           <h2 id="graph-title">Graph detail</h2>
@@ -216,7 +230,6 @@ static string AdminPage() =>
       </main>
       <script>
         const graphsEl = document.getElementById('graphs');
-        const libraryEl = document.getElementById('library');
         const graphEl = document.getElementById('graph');
         const graphTitleEl = document.getElementById('graph-title');
         const graphMetaEl = document.getElementById('graph-meta');
@@ -240,11 +253,8 @@ static string AdminPage() =>
 
         async function loadGraphs() {
           graphsEl.textContent = 'Loading...';
-          libraryEl.textContent = 'Loading...';
           const graphs = await fetch('/api/admin/graphs?limit=100').then(r => r.json());
-          const library = await fetch('/api/admin/library').then(r => r.json());
           graphsEl.innerHTML = '';
-          libraryEl.innerHTML = '';
           if (graphs.length === 0) {
             graphsEl.textContent = 'No graphs persisted yet.';
             return;
@@ -261,24 +271,6 @@ static string AdminPage() =>
           }
           if (!selectedGraphId) {
             await loadGraph(graphs[0].id);
-          }
-          renderLibrary(library);
-        }
-
-        function renderLibrary(items) {
-          if (items.length === 0) {
-            libraryEl.textContent = 'No reusable tasks yet.';
-            return;
-          }
-          for (const item of items) {
-            const card = document.createElement('div');
-            card.className = 'card';
-            card.innerHTML = `
-              <div><strong>${escapeHtml(item.displayName || item.key)}</strong></div>
-              <div class="muted">${escapeHtml(item.type)} template - ${escapeHtml(item.key)}</div>
-              <div class="muted">${escapeHtml(item.payloadTemplate)}</div>
-              <div class="muted">${fmtTime(item.createdAt)}</div>`;
-            libraryEl.appendChild(card);
           }
         }
 
@@ -354,6 +346,216 @@ static string AdminPage() =>
         }
 
         loadGraphs();
+      </script>
+    </body>
+    </html>
+    """;
+
+static string CapabilitiesPage() =>
+    """
+    <!doctype html>
+    <html lang="en">
+    <head>
+      <meta charset="utf-8" />
+      <meta name="viewport" content="width=device-width, initial-scale=1" />
+      <title>ttasks capabilities</title>
+      <style>
+        :root { color-scheme: light dark; --border: #d0d7de; --muted: #57606a; --bg: #f6f8fa; --code-bg: #f6f8fa; --code-fg: #24292f; }
+        @media (prefers-color-scheme: dark) {
+          :root { --border: #8b949e; --muted: #8b949e; --bg: #161b22; --code-bg: #161b22; --code-fg: #e6edf3; }
+        }
+        body { font-family: system-ui, sans-serif; margin: 0; }
+        header { border-bottom: 1px solid var(--border); padding: 1rem; display: flex; justify-content: space-between; align-items: center; }
+        nav { display: flex; gap: .75rem; margin-top: .5rem; }
+        nav a { color: inherit; }
+        main { padding: 1rem; }
+        h1, h2, h3 { margin: 0 0 .75rem; }
+        button { border: 1px solid var(--border); border-radius: .4rem; background: canvas; padding: .4rem .6rem; cursor: pointer; }
+        .list { display: grid; gap: .75rem; max-width: 1100px; }
+        .card { border: 1px solid var(--border); border-radius: .5rem; padding: .8rem; background: canvas; }
+        .muted { color: var(--muted); font-size: .85rem; }
+        .row { display: flex; gap: .5rem; align-items: center; justify-content: space-between; }
+        .badge { border-radius: 999px; padding: .15rem .45rem; font-size: .75rem; font-weight: 700; background: var(--bg); color: var(--muted); }
+        code { background: var(--code-bg); color: var(--code-fg); border-radius: .25rem; padding: .1rem .25rem; }
+        ul { margin-bottom: 0; }
+      </style>
+    </head>
+    <body>
+      <header>
+        <div>
+          <h1>ttasks capabilities</h1>
+          <div class="muted">Host-approved actions the chat planner can use</div>
+          <nav>
+            <a href="/admin">Graphs and tasks</a>
+            <strong>Capabilities</strong>
+            <a href="/admin/library">Task library</a>
+          </nav>
+        </div>
+        <button id="refresh">Refresh</button>
+      </header>
+      <main>
+        <div id="capabilities" class="list">Loading...</div>
+      </main>
+      <script>
+        const capabilitiesEl = document.getElementById('capabilities');
+        document.getElementById('refresh').addEventListener('click', loadCapabilities);
+
+        async function loadCapabilities() {
+          capabilitiesEl.textContent = 'Loading...';
+          const capabilities = await fetch('/api/admin/capabilities').then(r => r.json());
+          capabilitiesEl.innerHTML = '';
+          if (capabilities.length === 0) {
+            capabilitiesEl.textContent = 'No capabilities registered.';
+            return;
+          }
+          for (const capability of capabilities) {
+            const card = document.createElement('div');
+            card.className = 'card';
+            card.innerHTML = `
+              <div class="row"><h2>${escapeHtml(capability.displayName)}</h2><span class="badge">${escapeHtml(capability.kind)}</span></div>
+              <div class="muted">${escapeHtml(capability.type)} - ${escapeHtml(capability.policy)}</div>
+              <p>${escapeHtml(capability.description)}</p>
+              <p><strong>Availability:</strong> ${escapeHtml(capability.availability)}</p>
+              <p><strong>Task library:</strong> ${escapeHtml(capability.taskLibraryBehavior)}</p>
+              <h3>Examples</h3>
+              <ul>${capability.examples.map(example => `<li><code>${escapeHtml(example)}</code></li>`).join('')}</ul>`;
+            capabilitiesEl.appendChild(card);
+          }
+        }
+
+        function escapeHtml(value) {
+          return String(value ?? '').replace(/[&<>"']/g, ch => ({
+            '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+          }[ch]));
+        }
+
+        loadCapabilities();
+      </script>
+    </body>
+    </html>
+    """;
+
+static string TaskLibraryPage() =>
+    """
+    <!doctype html>
+    <html lang="en">
+    <head>
+      <meta charset="utf-8" />
+      <meta name="viewport" content="width=device-width, initial-scale=1" />
+      <title>ttasks task library</title>
+      <style>
+        :root { color-scheme: light dark; --border: #d0d7de; --muted: #57606a; --bg: #f6f8fa; --code-bg: #f6f8fa; --code-fg: #24292f; }
+        @media (prefers-color-scheme: dark) {
+          :root { --border: #8b949e; --muted: #8b949e; --bg: #161b22; --code-bg: #161b22; --code-fg: #e6edf3; }
+        }
+        body { font-family: system-ui, sans-serif; margin: 0; }
+        header { border-bottom: 1px solid var(--border); padding: 1rem; display: flex; justify-content: space-between; align-items: center; }
+        nav { display: flex; gap: .75rem; margin-top: .5rem; }
+        nav a { color: inherit; }
+        main { display: grid; grid-template-columns: 360px minmax(360px, 1fr); min-height: calc(100vh - 65px); }
+        section { border-right: 1px solid var(--border); padding: 1rem; overflow: auto; }
+        section:last-child { border-right: 0; }
+        h1, h2, h3 { margin: 0 0 .75rem; }
+        button { border: 1px solid var(--border); border-radius: .4rem; background: canvas; padding: .4rem .6rem; cursor: pointer; }
+        .list { display: grid; gap: .5rem; }
+        .card { border: 1px solid var(--border); border-radius: .5rem; padding: .7rem; background: canvas; cursor: pointer; }
+        .card:hover, .card.selected { outline: 2px solid #0969da; }
+        .muted { color: var(--muted); font-size: .85rem; }
+        .row { display: flex; gap: .5rem; align-items: center; justify-content: space-between; }
+        .badge { border-radius: 999px; padding: .15rem .45rem; font-size: .75rem; font-weight: 700; background: var(--bg); color: var(--muted); }
+        pre { white-space: pre-wrap; overflow-wrap: anywhere; background: var(--code-bg); color: var(--code-fg); padding: .75rem; border-radius: .5rem; max-height: 45vh; overflow: auto; }
+        dl { display: grid; grid-template-columns: 8rem 1fr; gap: .35rem .75rem; }
+        dt { color: var(--muted); }
+        dd { margin: 0; overflow-wrap: anywhere; }
+      </style>
+    </head>
+    <body>
+      <header>
+        <div>
+          <h1>ttasks task library</h1>
+          <div class="muted">Saved reusable capability task templates</div>
+          <nav>
+            <a href="/admin">Graphs and tasks</a>
+            <a href="/admin/capabilities">Capabilities</a>
+            <strong>Task library</strong>
+          </nav>
+        </div>
+        <button id="refresh">Refresh</button>
+      </header>
+      <main>
+        <section>
+          <h2>Library items</h2>
+          <div id="library" class="list">Loading...</div>
+        </section>
+        <section>
+          <h2>Library item detail</h2>
+          <div id="detail">Select a library item.</div>
+        </section>
+      </main>
+      <script>
+        const libraryEl = document.getElementById('library');
+        const detailEl = document.getElementById('detail');
+        let items = [];
+        let selectedKey = null;
+        document.getElementById('refresh').addEventListener('click', loadLibrary);
+
+        async function loadLibrary() {
+          libraryEl.textContent = 'Loading...';
+          items = await fetch('/api/admin/library').then(r => r.json());
+          libraryEl.innerHTML = '';
+          if (items.length === 0) {
+            libraryEl.textContent = 'No reusable tasks yet.';
+            detailEl.textContent = 'No library items are available.';
+            return;
+          }
+          for (const item of items) {
+            const card = document.createElement('div');
+            card.className = `card ${item.key === selectedKey ? 'selected' : ''}`;
+            card.innerHTML = `
+              <div class="row"><strong>${escapeHtml(item.displayName || item.key)}</strong><span class="badge">${escapeHtml(item.type)}</span></div>
+              <div class="muted">${escapeHtml(item.key)}</div>
+              <div class="muted">${fmtTime(item.createdAt)}</div>`;
+            card.addEventListener('click', () => selectItem(item.key));
+            libraryEl.appendChild(card);
+          }
+          if (!selectedKey) {
+            selectItem(items[0].key);
+          }
+        }
+
+        function selectItem(key) {
+          selectedKey = key;
+          const item = items.find(candidate => candidate.key === key);
+          if (!item) return;
+          for (const card of libraryEl.children) {
+            card.classList.toggle('selected', card.querySelector('.muted')?.textContent === key);
+          }
+          detailEl.innerHTML = `
+            <h3>${escapeHtml(item.displayName || item.key)}</h3>
+            <dl>
+              <dt>id</dt><dd>${escapeHtml(item.id)}</dd>
+              <dt>key</dt><dd>${escapeHtml(item.key)}</dd>
+              <dt>type</dt><dd>${escapeHtml(item.type)}</dd>
+              <dt>created</dt><dd>${fmtTime(item.createdAt)}</dd>
+              <dt>description</dt><dd>${escapeHtml(item.description)}</dd>
+            </dl>
+            <h3>Payload template</h3>
+            <pre>${escapeHtml(item.payloadTemplate)}</pre>
+            <h3>Metadata</h3>
+            <pre>${escapeHtml(JSON.stringify(item.metadata || {}, null, 2))}</pre>`;
+        }
+
+        function fmtTime(value) {
+          return new Date(value).toLocaleString();
+        }
+
+        function escapeHtml(value) {
+          return String(value ?? '').replace(/[&<>"']/g, ch => ({
+            '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+          }[ch]));
+        }
+
+        loadLibrary();
       </script>
     </body>
     </html>

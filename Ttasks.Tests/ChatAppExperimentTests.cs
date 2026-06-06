@@ -121,23 +121,124 @@ public sealed class ChatAppExperimentTests
     }
 
     [Fact]
-    public void Chat_App_Mail_Today_Capability_Renders_Date_From_Clock_Template()
+    public void Chat_App_Mail_Capability_Exposes_Full_Tool_Documentation()
+    {
+        var provider = new MailToolCapabilityProvider(new FakeToolDocumentationProvider(("mail", "Mail CLI help")));
+
+        var capabilities = provider.GetCapabilities(new CapabilityRequest("page-1", "how many emails total did I get today?"));
+
+        Assert.Empty(capabilities.Capabilities);
+        var tool = Assert.Single(capabilities.Tools);
+        Assert.Equal("mail", tool.Kind);
+        Assert.Equal("full", tool.Policy);
+        Assert.Equal("Mail CLI help", tool.Documentation);
+        Assert.Equal("mail", tool.Metadata["toolName"]);
+    }
+
+    [Fact]
+    public void Chat_App_Calendar_Today_Capability_Renders_Date_From_Clock_Template()
     {
         var store = new InMemoryStore();
         var now = DateTimeOffset.Parse("2026-06-05T22:00:00-04:00");
         var time = new ManualTimeProvider(now);
-        var provider = new MailTodayCapabilityProvider(new StoreBackedTaskLibrary(store), new TaskLibraryTemplateRenderer(time));
+        var provider = new CalendarTodayCapabilityProvider(new StoreBackedTaskLibrary(store), new TaskLibraryTemplateRenderer(time));
 
-        var capabilities = provider.GetCapabilities(new CapabilityRequest("page-1", "look at today's mail"));
+        var capabilities = provider.GetCapabilities(new CapabilityRequest("page-1", "summarize today's calendar"));
 
         var capability = Assert.Single(capabilities.Capabilities);
-        Assert.Equal("mail.today", capability.Metadata["capabilityKind"]);
-        Assert.Contains("2026-06-05T00:00:00Z", capability.Payload, StringComparison.Ordinal);
-        Assert.Contains("2026-06-06T00:00:00Z", capability.Payload, StringComparison.Ordinal);
-        Assert.Contains("$filter", capability.Payload, StringComparison.Ordinal);
+        Assert.Equal("calendar.today", capability.Metadata["capabilityKind"]);
+        Assert.Equal("calendar list -s 2026-06-05T00:00:00 -e 2026-06-06T00:00:00 -n 10 --json", capability.Payload);
         var item = Assert.Single(new StoreBackedTaskLibrary(store).All());
-        Assert.Equal("mail.today", item.Key);
+        Assert.Equal("calendar.today", item.Key);
         Assert.Contains("{today:yyyy-MM-dd}", item.PayloadTemplate, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Chat_App_Azure_Provider_Exposes_Read_Only_Inventory_Capabilities()
+    {
+        var store = new InMemoryStore();
+        var provider = new AzureInventoryCapabilityProvider(new StoreBackedTaskLibrary(store), new TaskLibraryTemplateRenderer());
+
+        var groups = provider.GetCapabilities(new CapabilityRequest("page-1", "list azure resource groups"));
+        var resources = provider.GetCapabilities(new CapabilityRequest("page-1", "list azure resources"));
+        var subscriptions = provider.GetCapabilities(new CapabilityRequest("page-1", "list azure subscriptions"));
+
+        var groupCapability = Assert.Single(groups.Capabilities);
+        Assert.Equal("az.group.list", groupCapability.Metadata["capabilityKind"]);
+        Assert.Equal("az group list --only-show-errors --output json", groupCapability.Payload);
+        var resourceCapability = Assert.Single(resources.Capabilities);
+        Assert.Equal("az.resource.list", resourceCapability.Metadata["capabilityKind"]);
+        Assert.Equal("az resource list --only-show-errors --output json", resourceCapability.Payload);
+        var subscriptionCapability = Assert.Single(subscriptions.Capabilities);
+        Assert.Equal("az.account.list", subscriptionCapability.Metadata["capabilityKind"]);
+        Assert.Equal("az account list --only-show-errors --output json", subscriptionCapability.Payload);
+    }
+
+    [Fact]
+    public void Chat_App_Validator_Rejects_Malformed_Host_Capability_Payloads()
+    {
+        var validator = CreateValidator();
+        var plan = new GraphPlan(
+            new GraphPlanInfo("Bad capability"),
+            [
+                new GraphPlanTask("read", "powershell", CapabilityId: "cap-1"),
+                new GraphPlanTask("summary", "prompt", "summarize")
+            ],
+            [new GraphPlanEdge("read", "summary")]);
+
+        var malformedMail = new CapabilitySet(
+            [
+                new CommandCapability(
+                    "cap-1",
+                    "Bad mail",
+                    "Bad mail command",
+                    TaskType.Powershell,
+                    "mail search --json; Remove-Item C:\\temp\\x",
+                    new Dictionary<string, object?> { ["capabilityKind"] = "mail" })
+            ],
+            "unsupported");
+        var malformedCalendar = new CapabilitySet(
+            [
+                new CommandCapability(
+                    "cap-1",
+                    "Bad calendar",
+                    "Bad calendar command",
+                    TaskType.Powershell,
+                    "calendar delete --id abc",
+                    new Dictionary<string, object?> { ["capabilityKind"] = "calendar.today" })
+            ],
+            "unsupported");
+        var malformedAz = malformedCalendar with
+        {
+            Capabilities =
+            [
+                new CommandCapability(
+                    "cap-1",
+                    "Bad Azure",
+                    "Bad Azure command",
+                    TaskType.Powershell,
+                    "az vm delete --name bad --yes",
+                    new Dictionary<string, object?> { ["capabilityKind"] = "az.resource.list" })
+            ]
+        };
+        var unknownKind = malformedCalendar with
+        {
+            Capabilities =
+            [
+                new CommandCapability(
+                    "cap-1",
+                    "Unknown",
+                    "Unknown command",
+                    TaskType.Powershell,
+                    "echo ok",
+                    new Dictionary<string, object?> { ["capabilityKind"] = "unknown.kind" })
+            ]
+        };
+
+        Assert.Throws<ArgumentException>(() => validator.Validate(plan, malformedMail));
+        Assert.Throws<ArgumentException>(() => validator.Validate(plan, malformedCalendar));
+        Assert.Throws<ArgumentException>(() => validator.Validate(plan, malformedAz));
+        Assert.Throws<ArgumentException>(() => validator.Validate(plan, unknownKind));
     }
 
     [Fact]
@@ -268,6 +369,8 @@ public sealed class ChatAppExperimentTests
             registry ?? new ChatSessionRegistry(provider, CreateChatOptions()),
             store,
             new CompositeCapabilityProvider([new TeamsCapabilityProvider(library, new TaskLibraryTemplateRenderer(), new FakeTeamsChatMetadataResolver(), CreateChatOptions())]),
+            library,
+            new TaskLibraryTemplateRenderer(),
             CreateChatOptions());
     }
 
@@ -354,5 +457,20 @@ public sealed class ChatAppExperimentTests
             _topics.TryGetValue(chatId, out var topic)
                 ? new TeamsChatMetadata(chatId, topic)
                 : new TeamsChatMetadata(chatId);
+    }
+
+    private sealed class FakeToolDocumentationProvider : IToolDocumentationProvider
+    {
+        private readonly IReadOnlyDictionary<string, string> _help;
+
+        public FakeToolDocumentationProvider(params (string ToolName, string Help)[] help)
+        {
+            _help = help.ToDictionary(item => item.ToolName, item => item.Help, StringComparer.Ordinal);
+        }
+
+        public string GetHelp(string toolName) =>
+            _help.TryGetValue(toolName, out var help)
+                ? help
+                : string.Empty;
     }
 }
