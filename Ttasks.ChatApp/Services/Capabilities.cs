@@ -98,7 +98,9 @@ public sealed record TaskLibraryDefinition(
     TaskType TaskType,
     string PayloadTemplate,
     IReadOnlyList<TemplateParameter> Parameters,
-    IReadOnlyDictionary<string, object?> Metadata);
+    IReadOnlyDictionary<string, object?> Metadata,
+    string? ProcessFileName = null,
+    IReadOnlyList<string>? ProcessArgsTemplate = null);
 
 public sealed record TaskLibraryItem(
     string Id,
@@ -109,7 +111,9 @@ public sealed record TaskLibraryItem(
     string PayloadTemplate,
     IReadOnlyList<TemplateParameter> Parameters,
     IReadOnlyDictionary<string, object?> Metadata,
-    DateTimeOffset CreatedAt);
+    DateTimeOffset CreatedAt,
+    string? ProcessFileName = null,
+    IReadOnlyList<string>? ProcessArgsTemplate = null);
 
 public interface ITaskLibrary
 {
@@ -138,6 +142,8 @@ public sealed class StoreBackedTaskLibrary : ITaskLibrary
     public const string IsLibraryItemKey = "taskLibraryItem";
     public const string LibraryKeyKey = "taskLibraryKey";
     public const string TemplateParametersKey = "templateParameters";
+    public const string ProcessFileNameKey = "processFileName";
+    public const string ProcessArgsTemplateKey = "processArgsTemplate";
     private readonly ITaskStore _store;
 
     public StoreBackedTaskLibrary(ITaskStore store)
@@ -174,9 +180,11 @@ public sealed class StoreBackedTaskLibrary : ITaskLibrary
 
     private TaskLibraryItem UpdateIfChanged(TaskLibraryItem existing, TaskLibraryDefinition definition)
     {
-        if (existing.PayloadTemplate == definition.PayloadTemplate
+        if (SamePayloadTemplate(existing, definition)
             && existing.DisplayName == definition.DisplayName
             && existing.Description == definition.Description
+            && existing.ProcessFileName == definition.ProcessFileName
+            && SameStringList(existing.ProcessArgsTemplate, definition.ProcessArgsTemplate)
             && SameParameters(existing.Parameters, definition.Parameters)
             && MetadataContains(existing.Metadata, definition.Metadata))
             return existing;
@@ -184,13 +192,19 @@ public sealed class StoreBackedTaskLibrary : ITaskLibrary
         var task = _store.Tasks.Get(existing.Id);
         task.Title = definition.DisplayName;
         task.Description = definition.Description;
-        task.Payload = definition.PayloadTemplate;
+        task.Payload = CreateTemplateTask(definition, task.Metadata).Payload;
         task.SetMetadata(TemplateParametersKey, definition.Parameters.Select(ToMetadata).ToList());
+        SetOptionalMetadata(task, ProcessFileNameKey, definition.ProcessFileName);
+        SetOptionalMetadata(task, ProcessArgsTemplateKey, definition.ProcessArgsTemplate);
         foreach (var entry in definition.Metadata)
             task.SetMetadata(entry.Key, entry.Value);
         _store.Tasks.Save(task);
         return ToItem(task);
     }
+
+    private static bool SamePayloadTemplate(TaskLibraryItem existing, TaskLibraryDefinition definition) =>
+        definition.TaskType == TaskType.Process
+            || existing.PayloadTemplate == definition.PayloadTemplate;
 
     private static bool SameParameters(IReadOnlyList<TemplateParameter> left, IReadOnlyList<TemplateParameter> right)
     {
@@ -202,6 +216,13 @@ public sealed class StoreBackedTaskLibrary : ITaskLibrary
             && pair.First.Source == pair.Second.Source
             && pair.First.Format == pair.Second.Format
             && SameValue(pair.First.DefaultValue, pair.Second.DefaultValue));
+    }
+
+    private static bool SameStringList(IReadOnlyList<string>? left, IReadOnlyList<string>? right)
+    {
+        left ??= [];
+        right ??= [];
+        return left.SequenceEqual(right, StringComparer.Ordinal);
     }
 
     private static bool SameValue(object? left, object? right) =>
@@ -238,8 +259,33 @@ public sealed class StoreBackedTaskLibrary : ITaskLibrary
             TaskType.Prompt => CoreTask.Prompt(definition.PayloadTemplate, definition.DisplayName, definition.Description, metadata: metadata),
             TaskType.Bash => CoreTask.Bash(definition.PayloadTemplate, definition.DisplayName, definition.Description, metadata: metadata),
             TaskType.Agent => CoreTask.Agent(definition.PayloadTemplate, definition.DisplayName, definition.Description, metadata: metadata),
+            TaskType.Process => CoreTask.Process(
+                new ProcessCommand(
+                    definition.ProcessFileName ?? throw new ArgumentException("Process task library definitions require a process file name."),
+                    definition.ProcessArgsTemplate ?? []),
+                definition.DisplayName,
+                definition.Description,
+                metadata: AddProcessMetadata(metadata, definition)),
             _ => throw new ArgumentException($"Unsupported library task type '{definition.TaskType}'.")
         };
+
+    private static IReadOnlyDictionary<string, object?> AddProcessMetadata(IReadOnlyDictionary<string, object?> metadata, TaskLibraryDefinition definition)
+    {
+        var values = new Dictionary<string, object?>(metadata, StringComparer.Ordinal);
+        if (!string.IsNullOrWhiteSpace(definition.ProcessFileName))
+            values[ProcessFileNameKey] = definition.ProcessFileName;
+        if (definition.ProcessArgsTemplate is not null)
+            values[ProcessArgsTemplateKey] = definition.ProcessArgsTemplate.ToList();
+        return values;
+    }
+
+    private static void SetOptionalMetadata(CoreTask task, string key, object? value)
+    {
+        if (value is null)
+            task.RemoveMetadata(key);
+        else
+            task.SetMetadata(key, value);
+    }
 
     private static bool IsLibraryTask(CoreTask task) =>
         task.Metadata.TryGetValue(IsLibraryItemKey, out var value) && value is bool boolValue && boolValue;
@@ -259,7 +305,9 @@ public sealed class StoreBackedTaskLibrary : ITaskLibrary
             task.Payload,
             ReadParameters(task.Metadata),
             task.Metadata,
-            task.CreatedAt);
+            task.CreatedAt,
+            ReadString(task.Metadata, ProcessFileNameKey),
+            ReadStringList(task.Metadata, ProcessArgsTemplateKey));
     }
 
     private static IReadOnlyDictionary<string, object?> ToMetadata(TemplateParameter parameter)
@@ -291,6 +339,20 @@ public sealed class StoreBackedTaskLibrary : ITaskLibrary
             .Where(parameter => !string.IsNullOrWhiteSpace(parameter.Name) && !string.IsNullOrWhiteSpace(parameter.Source))
             .ToList();
     }
+
+    private static string? ReadString(IReadOnlyDictionary<string, object?> metadata, string key) =>
+        metadata.TryGetValue(key, out var value) ? value as string : null;
+
+    private static IReadOnlyList<string>? ReadStringList(IReadOnlyDictionary<string, object?> metadata, string key)
+    {
+        if (!metadata.TryGetValue(key, out var raw))
+            return null;
+        if (raw is IEnumerable<object?> values)
+            return values.OfType<string>().ToList();
+        if (raw is IEnumerable<string> strings)
+            return strings.ToList();
+        return null;
+    }
 }
 
 public sealed partial class TaskLibraryTemplateRenderer
@@ -320,10 +382,35 @@ public sealed partial class TaskLibraryTemplateRenderer
             return FormatValue(ResolveValue(item, parameter), format);
         });
 
+    public ProcessCommand RenderProcess(TaskLibraryItem item)
+    {
+        if (item.TaskType != TaskType.Process)
+            throw new InvalidOperationException($"Template '{item.Key}' is not a process template.");
+        if (string.IsNullOrWhiteSpace(item.ProcessFileName))
+            throw new InvalidOperationException($"Process template '{item.Key}' is missing a process file name.");
+
+        return new ProcessCommand(
+            item.ProcessFileName,
+            (item.ProcessArgsTemplate ?? []).Select(arg => RenderText(item, arg)).ToList());
+    }
+
+    private string RenderText(TaskLibraryItem item, string template) =>
+        TokenPattern.Replace(template, match =>
+        {
+            var name = match.Groups["name"].Value;
+            var parameter = item.Parameters.FirstOrDefault(candidate => string.Equals(candidate.Name, name, StringComparison.Ordinal));
+            if (parameter is null)
+                throw new InvalidOperationException($"Template '{item.Key}' references unknown parameter '{name}'.");
+
+            var format = match.Groups["format"].Success ? match.Groups["format"].Value : parameter.Format;
+            return FormatValue(ResolveValue(item, parameter), format);
+        });
+
     private object? ResolveValue(TaskLibraryItem item, TemplateParameter parameter) =>
         parameter.Source switch
         {
             "clock.now" => _timeProvider.GetLocalNow(),
+            "clock.yesterday" => _timeProvider.GetLocalNow().AddDays(-1),
             "clock.tomorrow" => _timeProvider.GetLocalNow().AddDays(1),
             "default" => parameter.DefaultValue,
             var source when source.StartsWith("metadata:", StringComparison.Ordinal) =>

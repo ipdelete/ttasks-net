@@ -20,7 +20,8 @@ The important distinction is that **capability does not always mean executable c
 2. For fixed or limited capabilities, the provider creates or reuses deterministic task-library templates immediately.
 3. For full-tool capabilities, the provider exposes tool documentation such as `mail --help`.
 4. The tool-authoring prompt asks the LLM to propose task-library templates using only the exposed tool docs.
-5. The host validates the proposed template against the capability policy and saves it to the task library.
+5. The host validates the proposed template against the capability policy and exposes it as an in-memory candidate.
+6. The host promotes successful candidates selected by the winning graph to the task library.
 6. The graph planner receives concrete capability IDs for task-library-backed commands.
 7. `GraphPlanValidator` rejects model-authored executable graph payloads and validates selected capabilities.
 8. `GraphPlanBuilder` resolves capability IDs to executable task payloads host-side.
@@ -51,7 +52,7 @@ For full-tool capabilities, the provider should:
   - metadata identifying the tool and policy
 - Let `ChatTurnService` run the tool-authoring step to create task-library-backed `CommandCapability` values.
 
-Use task-library templates for anything executable. Prefer host-derived parameters such as `clock.now`, `clock.tomorrow`, `default`, or `metadata:<key>` when templates need runtime values.
+Use task-library templates for anything executable. Prefer host-derived parameters such as `clock.now`, `clock.yesterday`, `clock.tomorrow`, `default`, or `metadata:<key>` when templates need runtime values.
 
 ### `Ttasks.ChatApp\Program.cs`
 
@@ -78,9 +79,9 @@ The tool-authoring prompt should:
 
 - Include only host-exposed tool capabilities and their docs.
 - Ask for structured `ToolTaskProposal` output.
-- Require one CLI invocation per template.
-- Reject command chaining, pipes, and shell metacharacters.
-- Save accepted proposals as task-library templates.
+- Require `process` templates with `fileName` plus `argsTemplate` for external CLI tools.
+- Validate that the process `fileName` stays inside the approved tool boundary.
+- Expose accepted proposals as candidates; promote only candidates selected by a successful graph run.
 - Convert saved templates into normal `CommandCapability` values for graph planning.
 
 ### `Ttasks.ChatApp\Services\GraphPlanValidator.cs`
@@ -89,7 +90,7 @@ Add a payload validation branch for the new `capabilityKind`.
 
 Validation should match the policy:
 
-- `full-tool`: allow commands for the named tool only, with no command chaining or shell composition.
+- `full-tool`: allow structured process templates for the named tool. The tool executable is the boundary; do not hard-code strategy limits such as specific OData shapes or result caps in ttasks validation.
 - `limited-tool`: allow only the specific approved subcommands/templates.
 - `fixed-template`: match the exact rendered command shape.
 
@@ -127,11 +128,12 @@ Add tests for:
 ## Safety rules
 
 - Do not let the LLM author executable graph payloads directly.
-- Full-tool capabilities are allowed, but they must still become task-library templates before graph planning.
-- Full-tool templates must invoke only the approved tool and must not use pipes, command chaining, or shell metacharacters.
+- Full-tool capabilities are allowed, but they must become validated in-memory candidates before graph planning and are promoted to the task library only after success.
+- Full-tool process templates must invoke only the approved tool executable.
 - Limited-tool capabilities must stay narrow until explicitly expanded.
 - Fixed-template capabilities should remain deterministic.
-- Make command output bounded where possible, such as `--top`, `-n`, or specific date ranges.
+- For full-tool capabilities, let the planner choose the documented command strategy needed for the user request. If a command returns only a bounded page, downstream prompts should say that plainly instead of treating the page as a total.
+- Complete-result requests should prove coverage using documented count, all-results, paging, cursor, continuation-token, offset, skip, or next-page support before reporting exact totals.
 - Add timeouts when a command can hang or trigger auth/device-login flows.
 - Preserve provenance metadata: `capabilityKind`, `capabilityPolicy`, `toolName`, `taskLibraryKey`, and `libraryTaskId`.
 

@@ -11,6 +11,7 @@ Task-library items include:
 - description
 - task type
 - payload template
+- process file name and argument template, for `process` task items
 - template parameters
 - metadata
 - created timestamp
@@ -23,7 +24,7 @@ Task-library items are created when:
 
 - a provider sees a reusable resource, such as a Teams chat ID
 - a fixed-template capability is first needed, such as `calendar.today`
-- a full-tool authoring step accepts an LLM-proposed reusable template, such as a mail search
+- a full-tool candidate template is selected by a graph that succeeds, such as a mail search
 
 Existing task-library items are reused on later turns.
 
@@ -32,6 +33,7 @@ Existing task-library items are reused on later turns.
 Templates support host-rendered parameters:
 
 - `clock.now`
+- `clock.yesterday`
 - `clock.tomorrow`
 - `default`
 - `metadata:<key>`
@@ -45,6 +47,15 @@ calendar list -s {today:yyyy-MM-dd}T00:00:00 -e {tomorrow:yyyy-MM-dd}T00:00:00 -
 ```text
 teams read {chatId} -n {maxMessages} --json
 ```
+
+Process templates store the executable separately from argv templates:
+
+```text
+fileName: mail
+argsTemplate: ["search", "--query", "?$filter=receivedDateTime ge {yesterday:yyyy-MM-dd}T00:00:00Z&$orderby=receivedDateTime desc&$top={top}", "--json"]
+```
+
+Use process templates for external CLI tools. Use string payload templates for shell/script task types such as PowerShell. For full-tool capabilities, the app first executes in-memory candidates during the repair loop, then stores useful strategies selected by a successful graph instead of forcing every request through one fixed query shape.
 
 ## Teams alias enrichment
 

@@ -52,7 +52,9 @@ public sealed record ToolTaskProposal(
     string DisplayName,
     string Description,
     string Type,
-    string PayloadTemplate,
+    string? PayloadTemplate = null,
+    string? FileName = null,
+    IReadOnlyList<string>? ArgsTemplate = null,
     IReadOnlyList<TemplateParameter>? Parameters = null,
     IReadOnlyDictionary<string, object?>? Metadata = null,
     string? ToolCapabilityKind = null);

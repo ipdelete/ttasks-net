@@ -100,6 +100,7 @@ public sealed class TaskExecutor : IDisposable
         var executor = new TaskExecutor(store);
         executor.Register(TaskType.Bash, RunBash);
         executor.Register(TaskType.Powershell, RunPowerShell);
+        executor.Register(TaskType.Process, RunProcessTask);
         return executor;
     }
 
@@ -499,6 +500,16 @@ public sealed class TaskExecutor : IDisposable
         throw new InvalidOperationException("PowerShell executable was not found.");
     }
 
+    private static object? RunProcessTask(TaskContext context)
+    {
+        var command = context.Task.GetProcessCommand();
+        var fileName = Path.IsPathRooted(command.FileName)
+            ? command.FileName
+            : FindExecutable(command.FileName) ?? throw new InvalidOperationException($"Process executable '{command.FileName}' was not found.");
+
+        return RunProcess(context, new ShellCommand(fileName, command.Args, command.WorkingDirectory, command.Environment));
+    }
+
     private static object? RunProcess(TaskContext context, ShellCommand command)
     {
         var startInfo = new ProcessStartInfo(command.FileName)
@@ -510,6 +521,10 @@ public sealed class TaskExecutor : IDisposable
             StandardOutputEncoding = Encoding.UTF8,
             StandardErrorEncoding = Encoding.UTF8
         };
+        if (!string.IsNullOrWhiteSpace(command.WorkingDirectory))
+            startInfo.WorkingDirectory = command.WorkingDirectory;
+        foreach (var entry in command.Environment ?? new Dictionary<string, string>())
+            startInfo.Environment[entry.Key] = entry.Value;
 
         foreach (var argument in command.Arguments)
             startInfo.ArgumentList.Add(argument);
@@ -638,7 +653,11 @@ public sealed class TaskExecutor : IDisposable
         return null;
     }
 
-    private sealed record ShellCommand(string FileName, IReadOnlyList<string> Arguments);
+    private sealed record ShellCommand(
+        string FileName,
+        IReadOnlyList<string> Arguments,
+        string? WorkingDirectory = null,
+        IReadOnlyDictionary<string, string>? Environment = null);
 
     private static IReadOnlyDictionary<string, Task> SnapshotUpstream(IReadOnlyDictionary<string, Task>? upstream, IReadOnlyList<Task>? orderedUpstream)
     {

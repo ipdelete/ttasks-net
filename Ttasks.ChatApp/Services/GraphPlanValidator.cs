@@ -56,7 +56,8 @@ public sealed partial class GraphPlanValidator
             return;
         }
 
-        if (!string.Equals(task.Type, "powershell", StringComparison.OrdinalIgnoreCase))
+        if (!string.Equals(task.Type, "powershell", StringComparison.OrdinalIgnoreCase)
+            && !string.Equals(task.Type, "process", StringComparison.OrdinalIgnoreCase))
             throw new ArgumentException($"Task '{task.Id}' type '{task.Type}' is not allowed.");
 
         if (!string.IsNullOrWhiteSpace(task.Payload))
@@ -68,7 +69,7 @@ public sealed partial class GraphPlanValidator
         if (capabilities is null || !capabilities.ById.TryGetValue(task.CapabilityId, out var capability))
             throw new ArgumentException($"Task '{task.Id}' references an unavailable capability.");
 
-        if (capability.TaskType != TaskType.Powershell)
+        if (!string.Equals(task.Type, ToPlanType(capability.TaskType), StringComparison.OrdinalIgnoreCase))
             throw new ArgumentException($"Task '{task.Id}' type does not match capability '{capability.Id}'.");
 
         if (capability.Metadata.TryGetValue("capabilityKind", out var rawKind) && rawKind is string kind)
@@ -80,7 +81,7 @@ public sealed partial class GraphPlanValidator
         var isValid = kind switch
         {
             "teams.read" => TeamsReadPattern().IsMatch(capability.Payload) || TeamsReadChannelPattern().IsMatch(capability.Payload),
-            "mail" => MailToolPattern().IsMatch(capability.Payload) && IsSingleCommand(capability.Payload),
+            "mail" => IsValidMailCapability(capability),
             "mail.today" => MailTodayPattern().IsMatch(capability.Payload),
             "calendar.today" => CalendarTodayPattern().IsMatch(capability.Payload),
             "az.account.list" => capability.Payload == "az account list --only-show-errors --output json",
@@ -92,6 +93,17 @@ public sealed partial class GraphPlanValidator
         if (!isValid)
             throw new ArgumentException($"Capability '{capability.Id}' does not resolve to a valid '{kind}' command.");
     }
+
+    private static string ToPlanType(TaskType taskType) =>
+        taskType switch
+        {
+            TaskType.Powershell => "powershell",
+            TaskType.Process => "process",
+            TaskType.Prompt => "prompt",
+            TaskType.Bash => "bash",
+            TaskType.Agent => "agent",
+            _ => taskType.ToString().ToLowerInvariant()
+        };
 
     private static void EnsureAcyclic(GraphPlan plan)
     {
@@ -146,4 +158,50 @@ public sealed partial class GraphPlanValidator
         && !payload.Contains("&&", StringComparison.Ordinal)
         && !payload.Contains('|')
         && !payload.Contains(';');
+
+    private static bool IsValidMailCommand(string payload)
+    {
+        return payload.Contains(" --query ", StringComparison.Ordinal)
+            ? MailSingleQuotedQueryPattern().IsMatch(payload)
+            : true;
+    }
+
+    private static bool IsValidMailCapability(CommandCapability capability)
+    {
+        if (capability.TaskType == TaskType.Process)
+            return IsValidMailProcessCommand(capability.Payload);
+
+        return MailToolPattern().IsMatch(capability.Payload)
+            && IsSingleCommand(capability.Payload)
+            && IsValidMailCommand(capability.Payload);
+    }
+
+    private static bool IsValidMailProcessCommand(string payload)
+    {
+        ProcessCommand command;
+        try
+        {
+            command = ProcessCommand.FromJson(payload);
+        }
+        catch (System.Text.Json.JsonException)
+        {
+            return false;
+        }
+        catch (InvalidOperationException)
+        {
+            return false;
+        }
+
+        if (!string.Equals(command.FileName, "mail", StringComparison.Ordinal))
+            return false;
+
+        var args = command.Args.ToList();
+        var queryIndex = args.FindIndex(arg => string.Equals(arg, "--query", StringComparison.Ordinal));
+        if (queryIndex < 0)
+            return true;
+        return queryIndex < args.Count - 1 && !string.IsNullOrWhiteSpace(args[queryIndex + 1]);
+    }
+
+    [GeneratedRegex("--query '\\?[^']+'")]
+    private static partial Regex MailSingleQuotedQueryPattern();
 }

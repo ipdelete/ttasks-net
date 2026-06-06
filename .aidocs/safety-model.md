@@ -18,7 +18,7 @@ The LLM cannot:
 - add executable payloads to non-prompt graph tasks
 - invent capability IDs
 - bypass host-side payload resolution
-- execute PowerShell payloads outside the current approved capability set
+- execute PowerShell or process payloads outside the current approved capability set
 
 ## Validation boundary
 
@@ -39,22 +39,23 @@ Unknown `capabilityKind` values are rejected.
 
 ## Execution boundary
 
-`ChatTurnService.RegisterPowerShellCapabilities` registers a PowerShell handler that only executes payloads present in the current host-approved capability set.
+`ChatTurnService.RegisterExecutableCapabilities` registers PowerShell and process handlers that only execute payloads present in the current host-approved capability set.
 
-If the graph contains any other PowerShell payload, execution fails.
+If the graph contains any other executable payload, execution fails.
 
 ## Policy-specific safety
 
 ### Full-tool
 
-Full-tool capabilities allow flexible task authoring, but accepted templates must:
+Full-tool capabilities allow flexible task authoring, but candidate templates must:
 
 - invoke only the approved tool
-- use one CLI command
-- avoid pipes
-- avoid command chaining
-- avoid shell metacharacters
-- become task-library items before graph planning
+- use structured process argv for CLI tools
+- pass host validation before graph planning
+
+The approved executable is the boundary for full-tool process capabilities. Strategy details such as filters, result size, count attempts, or paging approaches belong to the planner and tool documentation, not deterministic ttasks validation.
+
+Candidates are promoted to task-library items only after a successful graph selects them. Failed candidates remain transient observations for the repair loop.
 
 Current full-tool example: `mail`.
 

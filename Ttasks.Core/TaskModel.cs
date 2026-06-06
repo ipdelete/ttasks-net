@@ -1,4 +1,6 @@
 using System.Collections.ObjectModel;
+using System.Text.Json;
+using System.Text.Json.Serialization;
 
 namespace Ttasks.Core;
 
@@ -17,7 +19,45 @@ public enum TaskType
     Bash,
     Powershell,
     Prompt,
-    Agent
+    Agent,
+    Process
+}
+
+public sealed record ProcessCommand
+{
+    private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
+
+    [JsonConstructor]
+    public ProcessCommand(
+        string fileName,
+        IReadOnlyList<string> args,
+        string? workingDirectory = null,
+        IReadOnlyDictionary<string, string>? environment = null)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(fileName);
+        FileName = fileName;
+        Args = args.ToList().AsReadOnly();
+        WorkingDirectory = workingDirectory;
+        Environment = environment is null
+            ? null
+            : new ReadOnlyDictionary<string, string>(new Dictionary<string, string>(environment, StringComparer.Ordinal));
+    }
+
+    public ProcessCommand(string fileName, params string[] args)
+        : this(fileName, args.ToList())
+    {
+    }
+
+    public string FileName { get; }
+    public IReadOnlyList<string> Args { get; }
+    public string? WorkingDirectory { get; }
+    public IReadOnlyDictionary<string, string>? Environment { get; }
+
+    public string ToJson() => JsonSerializer.Serialize(this, JsonOptions);
+
+    public static ProcessCommand FromJson(string json) =>
+        JsonSerializer.Deserialize<ProcessCommand>(json, JsonOptions)
+        ?? throw new InvalidOperationException("Unable to parse process command payload.");
 }
 
 public sealed class TaskResult
@@ -123,6 +163,7 @@ public sealed class Task
         TaskType.Powershell => "powershell",
         TaskType.Prompt => "prompt",
         TaskType.Agent => "agent",
+        TaskType.Process => "process",
         _ => Type.ToString().ToLowerInvariant()
     };
     public string Payload
@@ -224,6 +265,20 @@ public sealed class Task
 
     public static Task Agent(string payload, string? title = null, string? description = null, int? timeout = null, IReadOnlyDictionary<string, object?>? metadata = null) =>
         new(TaskType.Agent, payload, title, description, timeout, metadata);
+
+    public static Task Process(ProcessCommand command, string? title = null, string? description = null, int? timeout = null, IReadOnlyDictionary<string, object?>? metadata = null)
+    {
+        ArgumentNullException.ThrowIfNull(command);
+        return new(TaskType.Process, command.ToJson(), title, description, timeout, metadata);
+    }
+
+    public ProcessCommand GetProcessCommand()
+    {
+        if (Type != TaskType.Process)
+            throw new InvalidOperationException("Task is not a process task.");
+
+        return ProcessCommand.FromJson(Payload);
+    }
 
     public void SetMetadata(string key, object? value) =>
         _metadata[MetadataValues.ValidateKey(key)] = MetadataValues.NormalizeValue(value);

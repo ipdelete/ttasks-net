@@ -136,6 +136,63 @@ public sealed class ChatAppExperimentTests
     }
 
     [Fact]
+    public void Chat_App_Template_Renderer_Supports_Yesterday_Clock_Source()
+    {
+        var store = new InMemoryStore();
+        var library = new StoreBackedTaskLibrary(store);
+        var item = library.GetOrAdd(new TaskLibraryDefinition(
+            "mail.yesterday",
+            "Read yesterday's mail",
+            "Search mail received yesterday.",
+            TaskType.Powershell,
+            "mail search --query '?$filter=receivedDateTime ge {yesterday:yyyy-MM-dd}T00:00:00Z and receivedDateTime lt {today:yyyy-MM-dd}T00:00:00Z&$top={top}' --json",
+            [
+                new TemplateParameter("yesterday", "clock.yesterday"),
+                new TemplateParameter("today", "clock.now"),
+                new TemplateParameter("top", "default", DefaultValue: 10)
+            ],
+            new Dictionary<string, object?> { ["capabilityKind"] = "mail" }));
+        var renderer = new TaskLibraryTemplateRenderer(new ManualTimeProvider(DateTimeOffset.Parse("2026-06-06T00:30:00-04:00")));
+
+        var payload = renderer.Render(item);
+
+        Assert.Contains("2026-06-05T00:00:00Z", payload, StringComparison.Ordinal);
+        Assert.Contains("2026-06-06T00:00:00Z", payload, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Chat_App_Template_Renderer_Supports_Process_Args_With_Clock_Tokens()
+    {
+        var store = new InMemoryStore();
+        var library = new StoreBackedTaskLibrary(store);
+        var item = library.GetOrAdd(new TaskLibraryDefinition(
+            "mail.yesterday.process",
+            "Read yesterday's mail",
+            "Search mail received yesterday.",
+            TaskType.Process,
+            "",
+            [
+                new TemplateParameter("yesterday", "clock.yesterday"),
+                new TemplateParameter("today", "clock.now"),
+                new TemplateParameter("top", "default", DefaultValue: 10)
+            ],
+            new Dictionary<string, object?> { ["capabilityKind"] = "mail" },
+            "mail",
+            [
+                "search",
+                "--query",
+                "?$filter=receivedDateTime ge {yesterday:yyyy-MM-dd}T00:00:00Z and receivedDateTime lt {today:yyyy-MM-dd}T00:00:00Z&$select=id,subject,from,receivedDateTime&$top={top}",
+                "--json"
+            ]));
+        var renderer = new TaskLibraryTemplateRenderer(new ManualTimeProvider(DateTimeOffset.Parse("2026-06-06T00:30:00-04:00")));
+
+        var command = renderer.RenderProcess(item);
+
+        Assert.Equal("mail", command.FileName);
+        Assert.Equal("?$filter=receivedDateTime ge 2026-06-05T00:00:00Z and receivedDateTime lt 2026-06-06T00:00:00Z&$select=id,subject,from,receivedDateTime&$top=10", command.Args[2]);
+    }
+
+    [Fact]
     public void Chat_App_Calendar_Today_Capability_Renders_Date_From_Clock_Template()
     {
         var store = new InMemoryStore();
@@ -197,6 +254,19 @@ public sealed class ChatAppExperimentTests
                     new Dictionary<string, object?> { ["capabilityKind"] = "mail" })
             ],
             "unsupported");
+        var doubleQuotedMailQuery = malformedMail with
+        {
+            Capabilities =
+            [
+                new CommandCapability(
+                    "cap-1",
+                    "Double quoted mail query",
+                    "Double quoted mail query command",
+                    TaskType.Powershell,
+                    "mail search --query \"?$filter=isRead eq false&$select=id,subject,from,receivedDateTime&$top=10\" --json",
+                    new Dictionary<string, object?> { ["capabilityKind"] = "mail" })
+            ]
+        };
         var malformedCalendar = new CapabilitySet(
             [
                 new CommandCapability(
@@ -236,9 +306,96 @@ public sealed class ChatAppExperimentTests
         };
 
         Assert.Throws<ArgumentException>(() => validator.Validate(plan, malformedMail));
+        Assert.Throws<ArgumentException>(() => validator.Validate(plan, doubleQuotedMailQuery));
         Assert.Throws<ArgumentException>(() => validator.Validate(plan, malformedCalendar));
         Assert.Throws<ArgumentException>(() => validator.Validate(plan, malformedAz));
         Assert.Throws<ArgumentException>(() => validator.Validate(plan, unknownKind));
+    }
+
+    [Fact]
+    public void Chat_App_Validator_And_Builder_Accept_Process_Mail_Capabilities()
+    {
+        var validator = CreateValidator();
+        var builder = new GraphPlanBuilder();
+        var command = new ProcessCommand(
+            "mail",
+            "search",
+            "--query",
+            "?$filter=isRead eq false&$select=id,subject,from,receivedDateTime&$top=10",
+            "--json");
+        var capabilities = new CapabilitySet(
+            [
+                new CommandCapability(
+                    "cap-mail",
+                    "Unread mail",
+                    "Read unread mail.",
+                    TaskType.Process,
+                    command.ToJson(),
+                    new Dictionary<string, object?> { ["capabilityKind"] = "mail" })
+            ],
+            "unsupported");
+        var plan = new GraphPlan(
+            new GraphPlanInfo("Read mail"),
+            [
+                new GraphPlanTask("read", "process", CapabilityId: "cap-mail"),
+                new GraphPlanTask("summary", "prompt", "summarize")
+            ],
+            [new GraphPlanEdge("read", "summary")]);
+
+        validator.Validate(plan, capabilities);
+        var graph = builder.Build(plan, capabilities);
+        var read = graph.Members.Single(task => task.Type == TaskType.Process);
+        var builtCommand = read.GetProcessCommand();
+
+        Assert.Equal(command.FileName, builtCommand.FileName);
+        Assert.Equal(command.Args, builtCommand.Args);
+    }
+
+    [Fact]
+    public void Chat_App_Validator_Treats_Process_Mail_As_The_Full_Tool_Boundary()
+    {
+        var validator = CreateValidator();
+        var broadMailCommand = new ProcessCommand(
+            "mail",
+            "search",
+            "--query",
+            "?$filter=receivedDateTime ge 2026-06-05T00:00:00Z and receivedDateTime lt 2026-06-06T00:00:00Z&$orderby=receivedDateTime desc&$select=id&$top=100",
+            "--top",
+            "100",
+            "--json");
+        var capabilities = new CapabilitySet(
+            [
+                new CommandCapability(
+                    "cap-mail",
+                    "Broad mail search",
+                    "Let the planner choose mail strategy.",
+                    TaskType.Process,
+                    broadMailCommand.ToJson(),
+                    new Dictionary<string, object?> { ["capabilityKind"] = "mail" })
+            ],
+            "unsupported");
+        var plan = new GraphPlan(
+            new GraphPlanInfo("Read mail"),
+            [
+                new GraphPlanTask("read", "process", CapabilityId: "cap-mail"),
+                new GraphPlanTask("summary", "prompt", "summarize")
+            ],
+            [new GraphPlanEdge("read", "summary")]);
+
+        validator.Validate(plan, capabilities);
+
+        var wrongTool = new CapabilitySet(
+            [
+                new CommandCapability(
+                    "cap-mail",
+                    "Wrong tool",
+                    "Attempts to leave the mail tool boundary.",
+                    TaskType.Process,
+                    new ProcessCommand("pwsh", broadMailCommand.Args).ToJson(),
+                    new Dictionary<string, object?> { ["capabilityKind"] = "mail" })
+            ],
+            "unsupported");
+        Assert.Throws<ArgumentException>(() => validator.Validate(plan, wrongTool));
     }
 
     [Fact]
@@ -351,6 +508,99 @@ public sealed class ChatAppExperimentTests
         Assert.Single(provider.Requests);
     }
 
+    [Fact]
+    public void Chat_App_Reauthors_Full_Tool_Candidates_After_Failure_And_Promotes_Winner()
+    {
+        var toolDir = Path.Combine(Path.GetTempPath(), $"ttasks-fake-mail-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(toolDir);
+        File.WriteAllText(Path.Combine(toolDir, "mail.cmd"), "@echo off\r\nif \"%1\"==\"fail\" exit /b 9\r\necho Count: 99\r\n");
+        var originalPath = Environment.GetEnvironmentVariable("PATH");
+        var provider = new RecordingLlmProvider();
+        provider.QueueResult(LlmTurnResult.Text("""{"mode":"graph","answer":null,"planIntent":"count yesterday mail"}"""));
+        provider.QueueResult(LlmTurnResult.Text("""
+            {
+              "tasks": [
+                {
+                  "key": "mail.bad-count",
+                  "displayName": "Bad mail count",
+                  "description": "Broken count attempt.",
+                  "type": "process",
+                  "fileName": "mail",
+                  "argsTemplate": ["fail"],
+                  "toolCapabilityKind": "mail"
+                }
+              ]
+            }
+            """));
+        provider.QueueResult(LlmTurnResult.Text("""
+            {
+              "graph": { "title": "Count mail" },
+              "tasks": [
+                { "id": "read", "type": "process", "capabilityId": "cap-1" },
+                { "id": "summary", "type": "prompt", "payload": "summarize" }
+              ],
+              "edges": [{ "from": "read", "to": "summary" }]
+            }
+            """));
+        provider.QueueResult(LlmTurnResult.Text("""
+            {
+              "tasks": [
+                {
+                  "key": "mail.good-count",
+                  "displayName": "Good mail count",
+                  "description": "Working count attempt.",
+                  "type": "process",
+                  "fileName": "mail",
+                  "argsTemplate": ["ok"],
+                  "toolCapabilityKind": "mail"
+                }
+              ]
+            }
+            """));
+        provider.QueueResult(LlmTurnResult.Text("""
+            {
+              "graph": { "title": "Count mail repaired" },
+              "tasks": [
+                { "id": "read", "type": "process", "capabilityId": "cap-1" },
+                { "id": "summary", "type": "prompt", "payload": "summarize" }
+              ],
+              "edges": [{ "from": "read", "to": "summary" }]
+            }
+            """));
+        provider.QueueResult(LlmTurnResult.Text("Count: 99"));
+        try
+        {
+            Environment.SetEnvironmentVariable("PATH", toolDir + Path.PathSeparator + originalPath);
+            var store = new InMemoryStore();
+            var library = new StoreBackedTaskLibrary(store);
+            var service = CreateChatTurnService(
+                provider,
+                store,
+                library,
+                new CompositeCapabilityProvider([new MailToolCapabilityProvider(new FakeToolDocumentationProvider(("mail", "mail fake help")))]),
+                Options.Create(new ChatAppOptions
+                {
+                    SystemMessagePath = WriteTempSystemMessage("test system message"),
+                    MaxGraphRepairAttempts = 1
+                }));
+
+            var response = service.Handle("page-1", "How many emails did I receive yesterday?");
+
+            Assert.Equal("Count: 99", response.Answer.Trim());
+            Assert.Equal(6, provider.Requests.Count);
+            Assert.Contains("Complete-result strategy", provider.Requests[1].Prompt);
+            Assert.Contains("Previous attempt failed", provider.Requests[3].Prompt);
+            var item = Assert.Single(library.All());
+            Assert.Equal("mail.good-count", item.Key);
+            Assert.Equal(["ok"], item.ProcessArgsTemplate);
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("PATH", originalPath);
+            Directory.Delete(toolDir, recursive: true);
+        }
+    }
+
     private static GraphPlanValidator CreateValidator() =>
         new(Options.Create(new ChatAppOptions
         {
@@ -362,16 +612,33 @@ public sealed class ChatAppExperimentTests
         provider ??= new RecordingLlmProvider("unused");
         var store = new InMemoryStore();
         var library = new StoreBackedTaskLibrary(store);
+        return CreateChatTurnService(
+            provider,
+            store,
+            library,
+            new CompositeCapabilityProvider([new TeamsCapabilityProvider(library, new TaskLibraryTemplateRenderer(), new FakeTeamsChatMetadataResolver(), CreateChatOptions())]),
+            CreateChatOptions(),
+            registry);
+    }
+
+    private static ChatTurnService CreateChatTurnService(
+        RecordingLlmProvider provider,
+        ITaskStore store,
+        ITaskLibrary library,
+        ICapabilityProvider capabilityProvider,
+        IOptions<ChatAppOptions> options,
+        ChatSessionRegistry? registry = null)
+    {
         return new ChatTurnService(
             provider,
-            CreateValidator(),
+            new GraphPlanValidator(options),
             new GraphPlanBuilder(),
-            registry ?? new ChatSessionRegistry(provider, CreateChatOptions()),
+            registry ?? new ChatSessionRegistry(provider, options),
             store,
-            new CompositeCapabilityProvider([new TeamsCapabilityProvider(library, new TaskLibraryTemplateRenderer(), new FakeTeamsChatMetadataResolver(), CreateChatOptions())]),
+            capabilityProvider,
             library,
             new TaskLibraryTemplateRenderer(),
-            CreateChatOptions());
+            options);
     }
 
     private static IOptions<ChatAppOptions> CreateChatOptions() =>

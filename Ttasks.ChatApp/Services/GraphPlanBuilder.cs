@@ -26,6 +26,7 @@ public sealed class GraphPlanBuilder
         task.Type.ToLowerInvariant() switch
         {
             "powershell" => CreateCapabilityTask(task, capabilities),
+            "process" => CreateCapabilityTask(task, capabilities),
             "prompt" => CoreTask.Prompt(task.Payload ?? string.Empty, task.Title, task.Description, task.Timeout, task.Metadata),
             _ => throw new ArgumentException($"Unsupported task type '{task.Type}'.")
         };
@@ -60,6 +61,12 @@ public sealed class GraphPlanBuilder
         {
             TaskType.Powershell => CoreTask.Powershell(
                 capability.Payload,
+                task.Title ?? capability.DisplayName,
+                task.Description ?? capability.Description,
+                task.Timeout,
+                metadata),
+            TaskType.Process => CoreTask.Process(
+                ProcessCommand.FromJson(capability.Payload),
                 task.Title ?? capability.DisplayName,
                 task.Description ?? capability.Description,
                 task.Timeout,

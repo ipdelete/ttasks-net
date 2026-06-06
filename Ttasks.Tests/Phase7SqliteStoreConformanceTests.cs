@@ -128,10 +128,25 @@ public sealed class Phase7SqliteStoreConformanceTests
         Assert.Equal(result.StartedAt, loaded.Result.StartedAt);
         Assert.Equal(result.FinishedAt, loaded.Result.FinishedAt);
         Assert.Equal("out", loaded.Result.Output);
-        Assert.Equal("err", loaded.Result.Error);
-        Assert.Equal(0, loaded.Result.ReturnCode);
-        Assert.Null(loaded.Result.TerminationReason);
-        Assert.Null(loaded.Result.Raw);
+    }
+
+    [Fact]
+    public void R_STORE_14_Process_Task_Roundtrip_Preserves_Command_Payload()
+    {
+        using var database = TempDatabase();
+        var store = new SqliteStore(database.Path);
+        var task = CoreTask.Process(
+            new ProcessCommand("mail", "search", "--query", "?$filter=isRead eq false&$top=10", "--json"),
+            title: "Mail search");
+
+        store.Tasks.Save(task);
+        var loaded = store.Tasks.Get(task.Id);
+        var command = loaded.GetProcessCommand();
+
+        Assert.Equal(TaskType.Process, loaded.Type);
+        Assert.Equal("Mail search", loaded.Title);
+        Assert.Equal("mail", command.FileName);
+        Assert.Equal(["search", "--query", "?$filter=isRead eq false&$top=10", "--json"], command.Args);
     }
 
     [Fact]

@@ -148,6 +148,36 @@ public class Phase6SubprocessConformanceTests
     }
 
     [Fact]
+    public void R_EXEC_28_Process_Handler_Executes_Argv_Without_Shell_Expansion()
+    {
+        if (!TaskExecutor.IsPowerShellAvailable())
+            return;
+
+        var script = Path.Combine(Path.GetTempPath(), $"ttasks-process-argv-{Guid.NewGuid():N}.ps1");
+        File.WriteAllText(script, "param([string]$x)\nWrite-Output $x\n");
+        var executor = TaskExecutor.WithBuiltInHandlers();
+        try
+        {
+            var task = CoreTask.Process(new ProcessCommand(
+                "pwsh",
+                "-NoProfile",
+                "-NonInteractive",
+                "-File",
+                script,
+                "?$filter=isRead eq false&$select=id,subject,from,receivedDateTime&$top=10"));
+
+            var result = executor.Execute(task);
+
+            Assert.Equal(TaskState.Succeeded, task.Status);
+            Assert.Contains("?$filter=isRead eq false&$select=id,subject,from,receivedDateTime&$top=10", result.Output);
+        }
+        finally
+        {
+            File.Delete(script);
+        }
+    }
+
+    [Fact]
     public void R_EXEC_34_Output_Events_Are_Not_Persisted()
     {
         var store = new InMemoryStore();

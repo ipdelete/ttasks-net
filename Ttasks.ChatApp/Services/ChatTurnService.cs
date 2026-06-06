@@ -8,6 +8,16 @@ namespace Ttasks.ChatApp.Services;
 public sealed class ChatTurnService
 {
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
+    private const string CompleteResultGuidance =
+        """
+        Complete-result strategy:
+        - If the user asks for all results, a total count, or a complete summary, do not infer completeness from one bounded page.
+        - Use the tool documentation to find count, --all, paging, cursor, continuation-token, offset, skip, or next-page support.
+        - Fetch only the fields needed for discovery/counting first, such as stable ids or keys.
+        - Page until the tool returns an empty page, a final short page, or another documented end condition.
+        - De-duplicate across pages by stable id/key before counting.
+        - Report an exact total only when the graph has proven complete coverage; otherwise say the result is bounded or incomplete.
+        """;
     private readonly ILlmProvider _provider;
     private readonly GraphPlanValidator _validator;
     private readonly GraphPlanBuilder _builder;
@@ -17,6 +27,8 @@ public sealed class ChatTurnService
     private readonly ITaskLibrary _library;
     private readonly TaskLibraryTemplateRenderer _renderer;
     private readonly ChatAppOptions _options;
+
+    private const string CandidateDefinitionMetadataKey = "candidateDefinition";
 
     public ChatTurnService(
         ILlmProvider provider,
@@ -57,20 +69,70 @@ public sealed class ChatTurnService
         var capabilities = _capabilities.GetCapabilities(new CapabilityRequest(activeSessionId, userMessage));
         if (capabilities.Capabilities.Count == 0 && capabilities.Tools.Count == 0)
             return new ChatResponse("answer", capabilities.EmptyMessage, activeSessionId);
-        if (capabilities.Tools.Count > 0)
-            capabilities = MaterializeToolCapabilities(executor, capabilities, route.PlanIntent ?? userMessage);
-        if (capabilities.Capabilities.Count == 0)
-            return new ChatResponse("answer", capabilities.EmptyMessage, activeSessionId);
+        var attempt = RunGraphAttempts(executor, llmSession, activeSessionId, userMessage, route.PlanIntent ?? userMessage, capabilities);
+        return new ChatResponse("graph", attempt.Answer, activeSessionId, attempt.GraphId, attempt.Tasks);
+    }
 
-        var planJson = executor.Execute(CoreTask.Prompt(CreatePlannerPrompt(route.PlanIntent ?? userMessage, capabilities))).Output;
-        var plan = ParseJson<GraphPlan>(planJson);
-        _validator.Validate(plan, capabilities);
+    private GraphAttemptOutcome RunGraphAttempts(TaskExecutor planningExecutor, LlmAgentSession llmSession, string sessionId, string userMessage, string planIntent, CapabilitySet baseCapabilities)
+    {
+        GraphAttemptOutcome? lastAttempt = null;
+        var repairContext = string.Empty;
+        var maxAttempts = Math.Max(1, _options.MaxGraphRepairAttempts + 1);
 
-        var graphExecutor = CreatePromptExecutor(llmSession, includeUpstreamResults: true, _store);
-        RegisterPowerShellCapabilities(graphExecutor, capabilities);
-        var graph = _builder.Build(plan, capabilities);
-        graph.Run(graphExecutor, maxWorkers: _options.MaxWorkers);
+        for (var attemptNumber = 1; attemptNumber <= maxAttempts; attemptNumber++)
+        {
+            var capabilities = baseCapabilities.Tools.Count > 0
+                ? MaterializeToolCapabilities(planningExecutor, baseCapabilities, planIntent, repairContext)
+                : baseCapabilities;
+            if (capabilities.Capabilities.Count == 0)
+                return new GraphAttemptOutcome(capabilities.EmptyMessage, null, []);
 
+            try
+            {
+                var prompt = string.IsNullOrWhiteSpace(repairContext)
+                    ? CreatePlannerPrompt(planIntent, capabilities)
+                    : CreateRepairPlannerPrompt(userMessage, planIntent, capabilities, repairContext);
+                var planJson = planningExecutor.Execute(CoreTask.Prompt(prompt)).Output;
+                var plan = ParseJson<GraphPlan>(planJson);
+                _validator.Validate(plan, capabilities);
+
+                var graphExecutor = CreatePromptExecutor(llmSession, includeUpstreamResults: true, _store);
+                RegisterExecutableCapabilities(graphExecutor, capabilities);
+                var graph = _builder.Build(plan, capabilities);
+                graph.Run(graphExecutor, maxWorkers: _options.MaxWorkers);
+
+                lastAttempt = ToOutcome(graph);
+                if (graph.Ok)
+                {
+                    PromoteUsedCandidateCapabilities(plan, capabilities);
+                    return lastAttempt;
+                }
+
+                repairContext = CreateFailureObservation(attemptNumber, planJson, plan, capabilities, lastAttempt.Tasks);
+            }
+            catch (Exception ex) when (ex is JsonException or ArgumentException or InvalidOperationException)
+            {
+                var tasks = lastAttempt?.Tasks ?? [];
+                repairContext = CreateFailureObservation(attemptNumber, ex, tasks);
+                lastAttempt = new GraphAttemptOutcome(
+                    $"Attempt {attemptNumber} failed before graph execution: {ex.Message}",
+                    null,
+                    tasks);
+            }
+        }
+
+        return lastAttempt is null
+            ? new GraphAttemptOutcome("The graph did not produce a final answer.", null, [])
+            : lastAttempt with
+            {
+                Answer = string.IsNullOrWhiteSpace(lastAttempt.Answer)
+                    ? DescribeGraphFailure(lastAttempt.Tasks)
+                    : lastAttempt.Answer
+            };
+    }
+
+    private static GraphAttemptOutcome ToOutcome(TaskGraph graph)
+    {
         var final = graph.Leaves().LastOrDefault(task => task.Type == TaskType.Prompt)
             ?? graph.Leaves().Last();
         var tasks = graph.Members
@@ -87,7 +149,7 @@ public sealed class ChatTurnService
         if (string.IsNullOrWhiteSpace(answer) && !graph.Ok)
             answer = DescribeGraphFailure(tasks);
 
-        return new ChatResponse("graph", answer ?? string.Empty, activeSessionId, graph.Id, tasks);
+        return new GraphAttemptOutcome(answer ?? string.Empty, graph.Id, tasks);
     }
 
     private static TaskExecutor CreatePromptExecutor(LlmAgentSession session, bool includeUpstreamResults, ITaskStore? store = null)
@@ -100,10 +162,14 @@ public sealed class ChatTurnService
         return executor;
     }
 
-    private static void RegisterPowerShellCapabilities(TaskExecutor executor, CapabilitySet capabilities)
+    private static void RegisterExecutableCapabilities(TaskExecutor executor, CapabilitySet capabilities)
     {
         var allowedPayloads = capabilities.Capabilities
             .Where(capability => capability.TaskType == TaskType.Powershell)
+            .Select(capability => capability.Payload)
+            .ToHashSet(StringComparer.Ordinal);
+        var allowedProcessPayloads = capabilities.Capabilities
+            .Where(capability => capability.TaskType == TaskType.Process)
             .Select(capability => capability.Payload)
             .ToHashSet(StringComparer.Ordinal);
 
@@ -113,6 +179,18 @@ public sealed class ChatTurnService
                 throw new InvalidOperationException("Only host-approved capability payloads are allowed in this experiment.");
 
             return TaskExecutor.WithBuiltInHandlers().Execute(CoreTask.Powershell(context.Payload, timeout: context.Timeout)).Raw;
+        });
+        executor.Register(TaskType.Process, context =>
+        {
+            if (!allowedProcessPayloads.Contains(context.Payload))
+                throw new InvalidOperationException("Only host-approved capability payloads are allowed in this experiment.");
+
+            return TaskExecutor.WithBuiltInHandlers().Execute(CoreTask.Process(
+                ProcessCommand.FromJson(context.Payload),
+                context.Title,
+                context.Description,
+                context.Timeout,
+                context.Task.Metadata)).Raw;
         });
     }
 
@@ -178,13 +256,15 @@ public sealed class ChatTurnService
         - The final prompt must depend on all read tasks.
         - Use stable semantic task ids.
 
+        {{CompleteResultGuidance}}
+
         Capability catalog:
         {{FormatCapabilityCatalog(capabilities)}}
         """;
 
-    private CapabilitySet MaterializeToolCapabilities(TaskExecutor executor, CapabilitySet capabilities, string planIntent)
+    private CapabilitySet MaterializeToolCapabilities(TaskExecutor executor, CapabilitySet capabilities, string planIntent, string repairContext)
     {
-        var proposalJson = executor.Execute(CoreTask.Prompt(CreateToolAuthoringPrompt(planIntent, capabilities.Tools))).Output;
+        var proposalJson = executor.Execute(CoreTask.Prompt(CreateToolAuthoringPrompt(planIntent, capabilities.Tools, repairContext))).Output;
         var proposals = ParseJson<ToolTaskProposalSet>(proposalJson);
         var toolByKind = capabilities.Tools.ToDictionary(tool => tool.Kind, StringComparer.Ordinal);
         var authored = proposals.Tasks
@@ -218,14 +298,17 @@ public sealed class ChatTurnService
             proposal.Key,
             proposal.DisplayName,
             proposal.Description,
-            TaskType.Powershell,
-            proposal.PayloadTemplate,
+            TaskType.Process,
+            proposal.PayloadTemplate ?? string.Empty,
             proposal.Parameters ?? [],
-            metadata);
-        var item = _library.GetOrAdd(definition);
+            metadata,
+            proposal.FileName,
+            proposal.ArgsTemplate ?? []);
+        var item = CreateCandidateItem(definition);
         metadata = new Dictionary<string, object?>(item.Metadata, StringComparer.Ordinal)
         {
-            ["libraryTaskId"] = item.Id
+            ["candidateTaskLibraryKey"] = item.Key,
+            [CandidateDefinitionMetadataKey] = definition
         };
 
         return new CommandCapability(
@@ -233,41 +316,66 @@ public sealed class ChatTurnService
             item.DisplayName,
             item.Description,
             item.TaskType,
-            _renderer.Render(item),
+            item.TaskType == TaskType.Process
+                ? _renderer.RenderProcess(item).ToJson()
+                : _renderer.Render(item),
             metadata);
+    }
+
+    private TaskLibraryItem CreateCandidateItem(TaskLibraryDefinition definition)
+    {
+        var metadata = new Dictionary<string, object?>(definition.Metadata, StringComparer.Ordinal)
+        {
+            [StoreBackedTaskLibrary.LibraryKeyKey] = definition.Key,
+            [StoreBackedTaskLibrary.TemplateParametersKey] = definition.Parameters.Select(parameter => new Dictionary<string, object?>(StringComparer.Ordinal)
+            {
+                ["name"] = parameter.Name,
+                ["source"] = parameter.Source,
+                ["format"] = parameter.Format,
+                ["defaultValue"] = parameter.DefaultValue
+            }).ToList(),
+            [StoreBackedTaskLibrary.ProcessFileNameKey] = definition.ProcessFileName,
+            [StoreBackedTaskLibrary.ProcessArgsTemplateKey] = definition.ProcessArgsTemplate?.ToList(),
+            ["candidateTaskLibraryItem"] = true
+        };
+
+        return new TaskLibraryItem(
+            $"candidate-{Guid.NewGuid():N}",
+            definition.Key,
+            definition.DisplayName,
+            definition.Description,
+            definition.TaskType,
+            definition.PayloadTemplate,
+            definition.Parameters,
+            metadata,
+            DateTimeOffset.UtcNow,
+            definition.ProcessFileName,
+            definition.ProcessArgsTemplate);
     }
 
     private static void ValidateToolProposal(ToolTaskProposal proposal, ToolCapability tool)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(proposal.Key);
         ArgumentException.ThrowIfNullOrWhiteSpace(proposal.DisplayName);
-        ArgumentException.ThrowIfNullOrWhiteSpace(proposal.PayloadTemplate);
-        if (!string.Equals(proposal.Type, "powershell", StringComparison.OrdinalIgnoreCase))
-            throw new InvalidOperationException($"Tool task proposal '{proposal.Key}' must use powershell.");
+        ArgumentException.ThrowIfNullOrWhiteSpace(proposal.FileName);
+        if (proposal.ArgsTemplate is null)
+            throw new InvalidOperationException($"Tool task proposal '{proposal.Key}' must include argsTemplate.");
+        if (!string.Equals(proposal.Type, "process", StringComparison.OrdinalIgnoreCase))
+            throw new InvalidOperationException($"Tool task proposal '{proposal.Key}' must use process.");
         if (!string.Equals(tool.Policy, "full", StringComparison.Ordinal))
             throw new InvalidOperationException($"Tool capability '{tool.Kind}' does not allow LLM-authored templates.");
-        if (!IsSingleToolCommand(proposal.PayloadTemplate, tool.ToolName))
-            throw new InvalidOperationException($"Tool task proposal '{proposal.Key}' must invoke only the '{tool.ToolName}' tool.");
+        if (!string.Equals(proposal.FileName, tool.ToolName, StringComparison.Ordinal))
+            throw new InvalidOperationException($"Tool task proposal '{proposal.Key}' must use the '{tool.ToolName}' tool.");
     }
 
-    private static bool IsSingleToolCommand(string payloadTemplate, string toolName)
-    {
-        var trimmed = payloadTemplate.Trim();
-        if (!trimmed.Equals(toolName, StringComparison.Ordinal) && !trimmed.StartsWith(toolName + " ", StringComparison.Ordinal))
-            return false;
-        return !trimmed.Contains('\n')
-            && !trimmed.Contains('\r')
-            && !trimmed.Contains("&&", StringComparison.Ordinal)
-            && !trimmed.Contains('|')
-            && !trimmed.Contains(';');
-    }
-
-    private string CreateToolAuthoringPrompt(string planIntent, IReadOnlyList<ToolCapability> tools) =>
+    private string CreateToolAuthoringPrompt(string planIntent, IReadOnlyList<ToolCapability> tools, string repairContext) =>
         $$"""
         Create task-library templates for the user's requested tool work.
 
         Intent:
         {{planIntent}}
+
+        {{FormatRepairContextForPrompt(repairContext)}}
 
         Return JSON only. Do not wrap it in Markdown.
 
@@ -278,13 +386,14 @@ public sealed class ChatTurnService
               "key": "stable.semantic.key",
               "displayName": "short user-facing name",
               "description": "what this task does",
-              "type": "powershell",
-              "payloadTemplate": "single CLI command template",
+              "type": "process",
+              "fileName": "tool executable name",
+              "argsTemplate": ["arg1", "arg2 with {token}"],
               "toolCapabilityKind": "matching tool capability kind",
               "parameters": [
                 { "name": "today", "source": "clock.now" },
                 { "name": "tomorrow", "source": "clock.tomorrow" },
-                { "name": "top", "source": "default", "defaultValue": 10 }
+                { "name": "top", "source": "default", "defaultValue": 100 }
               ],
               "metadata": { "purpose": "search" }
             }
@@ -293,15 +402,122 @@ public sealed class ChatTurnService
 
         Rules:
         - Create the minimum task templates needed for this intent.
-        - Payload templates must invoke exactly one listed tool and must not use pipes, command chaining, or shell metacharacters.
+        - For CLI tools, create process templates with fileName and argsTemplate. Do not create powershell templates for tool calls.
+        - fileName must equal the listed toolName for the selected tool capability.
+        - argsTemplate must contain one array item per process argument.
         - Use the tool documentation below to choose commands and flags.
-        - You may use template tokens such as {today:yyyy-MM-dd}, {tomorrow:yyyy-MM-dd}, and default parameters when useful.
-        - For date-based mail searches, prefer raw OData queries and JSON output.
+        - You may use template tokens such as {today:yyyy-MM-dd}, {yesterday:yyyy-MM-dd}, {tomorrow:yyyy-MM-dd}, and default parameters when useful.
+        - Supported parameter sources are clock.now, clock.yesterday, clock.tomorrow, default, and metadata:<key>.
+        - For full-tool capabilities, the approved tool is the boundary. Use any documented command, flag, or query shape for that tool that is needed to satisfy the user's request.
         - Use stable keys because accepted templates are saved in the task library for reuse.
+
+        {{CompleteResultGuidance}}
 
         Tool capabilities:
         {{FormatToolCatalog(tools)}}
         """;
+
+    private string CreateRepairPlannerPrompt(string userMessage, string planIntent, CapabilitySet capabilities, string repairContext) =>
+        $$"""
+        Revise the ttasks-net graph plan after a failed attempt.
+
+        Original user request:
+        {{userMessage}}
+
+        Intent:
+        {{planIntent}}
+
+        Failure observations:
+        {{repairContext}}
+
+        Return JSON only. Do not wrap it in Markdown.
+
+        Use the same schema and rules as the normal planner:
+        - Non-prompt tasks must reference one capabilityId from the catalog below.
+        - Do not include payload on non-prompt tasks.
+        - Do not invent, substitute, or add capability ids.
+        - Prefer changing only what is needed to recover from the failure.
+        - Add one final prompt task that summarizes upstream read outputs.
+        - The final prompt must depend on all read tasks.
+
+        {{CompleteResultGuidance}}
+
+        Capability catalog:
+        {{FormatCapabilityCatalog(capabilities)}}
+        """;
+
+    private static string FormatRepairContextForPrompt(string repairContext) =>
+        string.IsNullOrWhiteSpace(repairContext)
+            ? string.Empty
+            : "Previous attempt failed. Use these observations to choose a corrected tool strategy before proposing templates:\n" + repairContext;
+
+    private void PromoteUsedCandidateCapabilities(GraphPlan plan, CapabilitySet capabilities)
+    {
+        var usedCapabilityIds = plan.Tasks
+            .Select(task => task.CapabilityId)
+            .Where(id => !string.IsNullOrWhiteSpace(id))
+            .ToHashSet(StringComparer.Ordinal);
+
+        foreach (var capability in capabilities.Capabilities.Where(capability => usedCapabilityIds.Contains(capability.Id)))
+        {
+            if (capability.Metadata.TryGetValue(CandidateDefinitionMetadataKey, out var raw) && raw is TaskLibraryDefinition definition)
+                _library.GetOrAdd(definition);
+        }
+    }
+
+    private static string CreateFailureObservation(int attemptNumber, string planJson, GraphPlan plan, CapabilitySet capabilities, IReadOnlyList<ChatTaskSummary> tasks) =>
+        JsonSerializer.Serialize(
+            new
+            {
+                attempt = attemptNumber,
+                previousPlan = planJson,
+                selectedCapabilities = plan.Tasks
+                    .Where(task => !string.IsNullOrWhiteSpace(task.CapabilityId))
+                    .Select(task => new
+                    {
+                        task.Id,
+                        task.Type,
+                        task.CapabilityId,
+                        capability = capabilities.ById.TryGetValue(task.CapabilityId!, out var capability)
+                            ? new
+                            {
+                                capability.DisplayName,
+                                taskType = capability.TaskType == TaskType.Powershell ? "powershell" : capability.TaskType.ToString().ToLowerInvariant(),
+                                payload = capability.Payload,
+                                metadata = capability.Metadata
+                            }
+                            : null
+                    }),
+                failedTasks = tasks
+                    .Where(task => task.Status is "Failed" or "Blocked" or "Cancelled")
+                    .Select(task => new
+                    {
+                        task.Id,
+                        task.Type,
+                        task.Status,
+                        task.Error,
+                        task.BlockedBy,
+                        Output = Truncate(task.Output, 2000)
+                    })
+            },
+            new JsonSerializerOptions(JsonSerializerDefaults.Web) { WriteIndented = true });
+
+    private static string CreateFailureObservation(int attemptNumber, Exception exception, IReadOnlyList<ChatTaskSummary> tasks) =>
+        JsonSerializer.Serialize(
+            new
+            {
+                attempt = attemptNumber,
+                failure = new
+                {
+                    type = exception.GetType().Name,
+                    message = exception.Message
+                },
+                tasks
+            },
+            new JsonSerializerOptions(JsonSerializerDefaults.Web) { WriteIndented = true });
+
+    private static string Truncate(string value, int maxLength) =>
+        value.Length <= maxLength ? value : value[..maxLength] + "...";
 
     private static T ParseJson<T>(string text)
     {
@@ -374,4 +590,9 @@ public sealed class ChatTurnService
 
         return capability with { Id = id, Metadata = metadata };
     }
+
+    private sealed record GraphAttemptOutcome(
+        string Answer,
+        string? GraphId,
+        IReadOnlyList<ChatTaskSummary> Tasks);
 }

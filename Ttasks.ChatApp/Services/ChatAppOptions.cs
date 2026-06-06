@@ -8,5 +8,6 @@ public sealed class ChatAppOptions
     public int MaxTasks { get; set; } = 8;
     public int MaxWorkers { get; set; } = 3;
     public int DefaultTimeoutSeconds { get; set; } = 30;
+    public int MaxGraphRepairAttempts { get; set; } = 2;
     public int MaxTeamsReadMessages { get; set; } = 20;
 }

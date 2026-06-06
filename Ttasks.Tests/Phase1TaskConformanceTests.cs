@@ -13,6 +13,7 @@ public class Phase1TaskConformanceTests
         yield return new object[] { TaskType.Powershell, "powershell" };
         yield return new object[] { TaskType.Prompt, "prompt" };
         yield return new object[] { TaskType.Agent, "agent" };
+        yield return new object[] { TaskType.Process, "process" };
     }
 
     [Fact]

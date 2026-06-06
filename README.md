@@ -22,21 +22,21 @@ The project explores a safer pattern for LLM-assisted task execution:
 
 ## Features
 
-- task types for Bash, PowerShell, prompt, and agent work
+- task types for Bash, PowerShell, structured process argv, prompt, and agent work
 - dependency-aware `TaskGraph` execution with parallel workers
 - retry, timeout, cancellation, blocking, and result capture
 - in-memory and SQLite-backed stores
 - LLM prompt handlers through GitHub Copilot SDK integration
 - browser chat app with per-page shared sessions and replacement system prompt
 - capability policy modes: `full-tool`, `limited-tool`, and `fixed-template`
-- task library with parameterized payload templates
+- task library with parameterized payload templates and success-only promotion for full-tool candidates
 - Teams chat metadata enrichment and alias reuse
 - admin pages for graphs/tasks, capabilities, and task-library items
 
 ## Requirements
 
 - .NET 8 SDK
-- PowerShell for built-in PowerShell task execution
+- PowerShell for built-in PowerShell task execution and scripts
 - GitHub Copilot access for LLM-backed prompt/chat flows
 - Optional CLIs for chat app capabilities:
   - `teams`
@@ -88,18 +88,23 @@ graph.Run(executor);
 
 Prompt tasks require a prompt handler registration, such as the LLM session handler used by the chat app.
 
+Use `CoreTask.Process(new ProcessCommand("tool", "arg1", "arg2"))` for external CLI tools when arguments should bypass shell quoting and variable expansion. Keep `CoreTask.Powershell(...)` for actual PowerShell scripts.
+
 ## Chat app architecture
 
 The chat app separates planning from execution:
 
 1. The router decides whether a turn is a direct answer or graph work.
 2. Capability providers expose host-approved work for the turn.
-3. Full-tool capabilities can use tool docs to create reusable task-library templates.
+3. Full-tool capabilities can use tool docs to create in-memory candidate task templates.
 4. The planner receives only concrete capability IDs and descriptions.
 5. The validator rejects unsafe graph plans and malformed capability payloads.
 6. The builder resolves capability IDs to executable tasks.
 7. The executor runs only payloads from the current host-approved capability set.
-8. SQLite persistence makes graph and task runs inspectable through admin pages.
+8. Failed validation/execution can loop back through bounded candidate repair and replanning.
+9. Successful full-tool candidates selected by the winning graph are promoted to the task library.
+10. Complete-result requests are guided to prove coverage with documented count/all/paging mechanisms before reporting exact totals.
+11. SQLite persistence makes graph and task runs inspectable through admin pages.
 
 See [`.aidocs`](.aidocs/README.md) for developer documentation.
 

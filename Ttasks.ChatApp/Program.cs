@@ -83,13 +83,22 @@ app.MapGet("/", () => Results.Content(
           if (!message) return;
           input.value = '';
           add('user', message);
-          const response = await fetch('/api/chat', {
-            method: 'POST',
-            headers: { 'content-type': 'application/json' },
-            body: JSON.stringify({ sessionId, message })
-          });
-          const body = await response.json();
-          add('assistant', body.answer ?? body.error ?? JSON.stringify(body));
+          try {
+            const response = await fetch('/api/chat', {
+              method: 'POST',
+              headers: { 'content-type': 'application/json' },
+              body: JSON.stringify({ sessionId, message })
+            });
+            const text = await response.text();
+            const body = text ? JSON.parse(text) : {};
+            if (!response.ok) {
+              add('assistant', body.error ?? `Request failed with HTTP ${response.status}.`);
+              return;
+            }
+            add('assistant', body.answer ?? body.error ?? JSON.stringify(body));
+          } catch (error) {
+            add('assistant', `Request failed: ${error.message}`);
+          }
         });
       </script>
     </body>
