@@ -60,6 +60,7 @@ These map to the IETF RFC 2119 senses, narrowed for a library context.
 | `graph.md`            | DAG rules, blocking, finally / optional / required tasks.   |
 | `store.md`            | In-memory + SQLite persistence contracts.                   |
 | `copilot.md`          | Shared Copilot session lifecycle (later).                   |
+| `agent-graphs.md`     | LLM-authored graph plans, metadata, upstream fan-in prompts.|
 | `conformance.md`      | Index of every rule with level and reference test.          |
 
 Each topic file follows a four-section pattern:

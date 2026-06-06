@@ -8,23 +8,27 @@ public sealed class TaskGraph
     private readonly Dictionary<string, string> _errors = new(StringComparer.Ordinal);
     private bool _hasRun;
 
-    public TaskGraph(string? title = null)
+    public TaskGraph(string? title = null, IReadOnlyDictionary<string, object?>? metadata = null)
     {
         Id = Guid.NewGuid().ToString("N");
         Title = title ?? string.Empty;
+        _metadata = new Dictionary<string, object?>(MetadataValues.Normalize(metadata), StringComparer.Ordinal);
         CreatedAt = DateTimeOffset.UtcNow;
     }
 
-    private TaskGraph(string id, string? title, DateTimeOffset createdAt)
+    private TaskGraph(string id, string? title, DateTimeOffset createdAt, IReadOnlyDictionary<string, object?>? metadata)
     {
         Id = id;
         Title = title ?? string.Empty;
+        _metadata = new Dictionary<string, object?>(MetadataValues.Normalize(metadata), StringComparer.Ordinal);
         CreatedAt = createdAt;
     }
 
     public string Id { get; }
     public string Title { get; set; }
     public DateTimeOffset CreatedAt { get; }
+    private readonly Dictionary<string, object?> _metadata;
+    public IReadOnlyDictionary<string, object?> Metadata => new ReadOnlyDictionary<string, object?>(_metadata);
     public IReadOnlyList<Task> RequiredTasks => _nodes.Values.Where(n => n.Required).Select(n => n.Task).ToList();
     public IReadOnlyList<Task> Members => _nodes.Values.Select(n => n.Task).Distinct().ToList();
     public IReadOnlyList<Task> FinallyTasks => _nodes.Values.Where(n => n.Finally).Select(n => n.Task).ToList();
@@ -38,6 +42,13 @@ public sealed class TaskGraph
     public IReadOnlyList<Task> RequiredBlocked => _nodes.Values.Where(n => n.Required && n.Task.Status == TaskStatus.Blocked).Select(n => n.Task).ToList();
     public IReadOnlyDictionary<string, string> Errors => new Dictionary<string, string>(_errors, StringComparer.Ordinal);
     public bool Ok => _hasRun && (RequiredTasks.Count == 0 || (RequiredTasks.All(t => t.Status == TaskStatus.Succeeded) && !RequiredFailed.Any() && !RequiredBlocked.Any() && !_errors.Keys.Any(id => RequiredTasks.Any(t => t.Id == id))));
+
+    public void SetMetadata(string key, object? value) =>
+        _metadata[MetadataValues.ValidateKey(key)] = MetadataValues.NormalizeValue(value);
+
+    public bool RemoveMetadata(string key) => _metadata.Remove(MetadataValues.ValidateKey(key));
+
+    public void ClearMetadata() => _metadata.Clear();
 
     public void Add(Task task, IEnumerable<Task>? after = null, bool finally_ = false, bool required = true)
     {
@@ -112,7 +123,7 @@ public sealed class TaskGraph
                             attemptedThisRun.Add(task.Id);
                             var node = _nodes[task.Id];
                             var upstream = node.Dependencies.ToDictionary(dep => dep.Id, dep => dep, StringComparer.Ordinal);
-                            return System.Threading.Tasks.Task.Run(() => executor.Execute(task, upstream: upstream));
+                            return System.Threading.Tasks.Task.Run(() => executor.Execute(task, upstream: upstream, orderedUpstream: node.Dependencies));
                         })
                         .ToArray();
 
@@ -324,12 +335,12 @@ public sealed class TaskGraph
             .Select(node => new TaskGraphNodeSnapshot(node.Task, node.Dependencies.ToList(), node.Finally, node.Required))
             .ToList();
 
-    internal static TaskGraph Restore(string id, string? title, DateTimeOffset createdAt, IEnumerable<TaskGraphNodeSnapshot> nodes)
+    internal static TaskGraph Restore(string id, string? title, DateTimeOffset createdAt, IEnumerable<TaskGraphNodeSnapshot> nodes, IReadOnlyDictionary<string, object?>? metadata = null)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(id);
         ArgumentNullException.ThrowIfNull(nodes);
 
-        var graph = new TaskGraph(id, title, createdAt);
+        var graph = new TaskGraph(id, title, createdAt, metadata);
         foreach (var node in nodes)
             graph._nodes[node.Task.Id] = new GraphNode(node.Task, node.Dependencies.ToList(), node.Finally, node.Required);
         return graph;

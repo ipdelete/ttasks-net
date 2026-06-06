@@ -529,7 +529,7 @@ git commit -m "Implement durable store (R-STORE-13..24)"
 
 ### Phase 8 — Copilot / agent integration
 
-Status: **planned**
+Status: **implemented**
 
 Rule coverage:
 
@@ -610,6 +610,8 @@ Scenarios to port:
 - transition zoo persisted through durable store
 - mixed BASH → PROMPT → AGENT → BASH workflow
 - shared CopilotAgentSession multi-turn graph
+- agent-authored graph plan with task/graph metadata persisted through SQLite
+- fan-out Teams read tasks feeding an upstream-aware PROMPT summary task
 
 Gate slow/live/provider-dependent tests behind environment variables, e.g.:
 
@@ -617,6 +619,33 @@ Gate slow/live/provider-dependent tests behind environment variables, e.g.:
 TTASKS_LIVE=1 dotnet test
 TTASKS_COPILOT_LIVE=1 dotnet test
 ```
+
+## Phase 9 — Agent-authored graph metadata and upstream fan-in
+
+Status: **implemented**
+
+Rule coverage:
+
+- `R-AGENTGRAPH-01..15`
+
+Test files:
+
+```text
+Ttasks.Tests/Phase9AgentGraphMetadataConformanceTests.cs
+Ttasks.Tests/Phase9SqliteMetadataConformanceTests.cs
+Ttasks.Tests/Phase9UpstreamPromptConformanceTests.cs
+```
+
+Important edge cases:
+
+- planner output is validated as data before task construction
+- task and graph metadata roundtrip through in-memory and SQLite stores
+- metadata is detached on durable reload
+- graph metadata saves atomically with graph topology
+- upstream result envelopes include direct dependencies only
+- upstream result envelopes are deterministic and exclude `TaskResult.raw`
+- prompt/agent handlers include upstream output only when explicitly enabled
+- missing upstream results are represented in the envelope without failing
 
 ## Open questions for the .NET port
 

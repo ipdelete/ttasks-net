@@ -1,3 +1,5 @@
+using System.Collections.ObjectModel;
+
 namespace Ttasks.Core;
 
 public enum TaskStatus
@@ -51,12 +53,17 @@ public sealed class Task
             [(TaskStatus.Blocked, TaskStatus.Cancelled)] = true,
         };
 
-    public Task(TaskType type, string payload, string? title = null, string? description = null, int? timeout = null)
-        : this(Guid.NewGuid().ToString("N"), type, payload, title, description, timeout)
+    public Task(TaskType type, string payload, string? title = null, string? description = null, int? timeout = null, IReadOnlyDictionary<string, object?>? metadata = null)
+        : this(Guid.NewGuid().ToString("N"), type, payload, title, description, timeout, metadata)
     {
     }
 
     internal Task(string id, TaskType type, string payload, string? title = null, string? description = null, int? timeout = null)
+        : this(id, type, payload, title, description, timeout, null)
+    {
+    }
+
+    internal Task(string id, TaskType type, string payload, string? title, string? description, int? timeout, IReadOnlyDictionary<string, object?>? metadata)
     {
         if (!Enum.IsDefined(typeof(TaskType), type))
             throw new ArgumentOutOfRangeException(nameof(type), "Task type must be one of the built-in task types.");
@@ -72,6 +79,7 @@ public sealed class Task
         if (timeout.HasValue && timeout.Value <= 0)
             throw new ArgumentOutOfRangeException(nameof(timeout), "Timeout must be positive when supplied.");
         _timeout = timeout;
+        _metadata = new Dictionary<string, object?>(MetadataValues.Normalize(metadata), StringComparer.Ordinal);
         Status = TaskStatus.Pending;
         CreatedAt = DateTimeOffset.UtcNow;
     }
@@ -87,8 +95,9 @@ public sealed class Task
         string? error,
         string? blockedBy,
         DateTimeOffset createdAt,
-        TaskResult? result)
-        : this(id, type, payload, title, description, timeout)
+        TaskResult? result,
+        IReadOnlyDictionary<string, object?>? metadata = null)
+        : this(id, type, payload, title, description, timeout, metadata)
     {
         if (!Enum.IsDefined(typeof(TaskStatus), status))
             throw new ArgumentOutOfRangeException(nameof(status));
@@ -104,6 +113,7 @@ public sealed class Task
     private string _title;
     private string _description;
     private int? _timeout;
+    private readonly Dictionary<string, object?> _metadata;
 
     public string Id { get; }
     public TaskType Type { get; }
@@ -158,6 +168,7 @@ public sealed class Task
     public TaskResult? Result { get; private set; }
     public string? BlockedBy { get; private set; }
     public DateTimeOffset CreatedAt { get; }
+    public IReadOnlyDictionary<string, object?> Metadata => new ReadOnlyDictionary<string, object?>(_metadata);
 
     public bool IsPending => Status == TaskStatus.Pending;
     public bool IsRunning => Status == TaskStatus.Running;
@@ -202,17 +213,24 @@ public sealed class Task
         Status = nextStatus;
     }
 
-    public static Task Bash(string payload, string? title = null, string? description = null, int? timeout = null) =>
-        new(TaskType.Bash, payload, title, description, timeout);
+    public static Task Bash(string payload, string? title = null, string? description = null, int? timeout = null, IReadOnlyDictionary<string, object?>? metadata = null) =>
+        new(TaskType.Bash, payload, title, description, timeout, metadata);
 
-    public static Task Powershell(string payload, string? title = null, string? description = null, int? timeout = null) =>
-        new(TaskType.Powershell, payload, title, description, timeout);
+    public static Task Powershell(string payload, string? title = null, string? description = null, int? timeout = null, IReadOnlyDictionary<string, object?>? metadata = null) =>
+        new(TaskType.Powershell, payload, title, description, timeout, metadata);
 
-    public static Task Prompt(string payload, string? title = null, string? description = null, int? timeout = null) =>
-        new(TaskType.Prompt, payload, title, description, timeout);
+    public static Task Prompt(string payload, string? title = null, string? description = null, int? timeout = null, IReadOnlyDictionary<string, object?>? metadata = null) =>
+        new(TaskType.Prompt, payload, title, description, timeout, metadata);
 
-    public static Task Agent(string payload, string? title = null, string? description = null, int? timeout = null) =>
-        new(TaskType.Agent, payload, title, description, timeout);
+    public static Task Agent(string payload, string? title = null, string? description = null, int? timeout = null, IReadOnlyDictionary<string, object?>? metadata = null) =>
+        new(TaskType.Agent, payload, title, description, timeout, metadata);
+
+    public void SetMetadata(string key, object? value) =>
+        _metadata[MetadataValues.ValidateKey(key)] = MetadataValues.NormalizeValue(value);
+
+    public bool RemoveMetadata(string key) => _metadata.Remove(MetadataValues.ValidateKey(key));
+
+    public void ClearMetadata() => _metadata.Clear();
 
     public void Cancel()
     {
@@ -243,8 +261,9 @@ public sealed class Task
         string? error,
         string? blockedBy,
         DateTimeOffset createdAt,
-        TaskResult? result) =>
-        new(id, type, payload, title, description, timeout, status, error, blockedBy, createdAt, result);
+        TaskResult? result,
+        IReadOnlyDictionary<string, object?>? metadata = null) =>
+        new(id, type, payload, title, description, timeout, status, error, blockedBy, createdAt, result, metadata);
 
     public override bool Equals(object? obj) => obj is Task other && Id == other.Id;
 

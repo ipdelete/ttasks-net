@@ -23,7 +23,7 @@ public sealed class SqliteStore : ITaskStore, IDisposable
     private readonly object _gate = new();
     private readonly string _path;
 
-    public const int CurrentSchemaVersion = 1;
+    public const int CurrentSchemaVersion = 2;
 
     public SqliteStore(string path, SqliteStoreOptions? options = null)
     {
@@ -138,6 +138,7 @@ public sealed class SqliteStore : ITaskStore, IDisposable
                 title TEXT NOT NULL,
                 description TEXT NOT NULL,
                 timeout INTEGER NULL,
+                metadata_json TEXT NOT NULL DEFAULT '{}',
                 status INTEGER NOT NULL,
                 error TEXT NULL,
                 blocked_by TEXT NULL,
@@ -157,6 +158,7 @@ public sealed class SqliteStore : ITaskStore, IDisposable
             CREATE TABLE IF NOT EXISTS graphs (
                 id TEXT PRIMARY KEY,
                 title TEXT NOT NULL,
+                metadata_json TEXT NOT NULL DEFAULT '{}',
                 created_at TEXT NOT NULL
             );
             """);
@@ -219,10 +221,10 @@ public sealed class SqliteStore : ITaskStore, IDisposable
         command.CommandText =
             """
             INSERT INTO tasks(
-                id, type, payload, title, description, timeout, status, error, blocked_by, created_at,
+                id, type, payload, title, description, timeout, metadata_json, status, error, blocked_by, created_at,
                 result_status, result_started_at, result_finished_at, result_output, result_error, result_return_code, result_termination_reason)
             VALUES (
-                $id, $type, $payload, $title, $description, $timeout, $status, $error, $blocked_by, $created_at,
+                $id, $type, $payload, $title, $description, $timeout, $metadata_json, $status, $error, $blocked_by, $created_at,
                 $result_status, $result_started_at, $result_finished_at, $result_output, $result_error, $result_return_code, $result_termination_reason)
             ON CONFLICT(id) DO UPDATE SET
                 type = excluded.type,
@@ -230,6 +232,7 @@ public sealed class SqliteStore : ITaskStore, IDisposable
                 title = excluded.title,
                 description = excluded.description,
                 timeout = excluded.timeout,
+                metadata_json = excluded.metadata_json,
                 status = excluded.status,
                 error = excluded.error,
                 blocked_by = excluded.blocked_by,
@@ -248,6 +251,7 @@ public sealed class SqliteStore : ITaskStore, IDisposable
         command.Parameters.AddWithValue("$title", task.Title);
         command.Parameters.AddWithValue("$description", task.Description);
         command.Parameters.AddWithValue("$timeout", DbValue(task.Timeout));
+        command.Parameters.AddWithValue("$metadata_json", MetadataValues.Serialize(task.Metadata));
         command.Parameters.AddWithValue("$status", (int)task.Status);
         command.Parameters.AddWithValue("$error", DbValue(task.Error));
         command.Parameters.AddWithValue("$blocked_by", DbValue(task.BlockedBy));
@@ -299,7 +303,8 @@ public sealed class SqliteStore : ITaskStore, IDisposable
             reader.IsDBNull(reader.GetOrdinal("error")) ? null : reader.GetString(reader.GetOrdinal("error")),
             reader.IsDBNull(reader.GetOrdinal("blocked_by")) ? null : reader.GetString(reader.GetOrdinal("blocked_by")),
             ParseDateTimeOffset(reader.GetString(reader.GetOrdinal("created_at"))),
-            result);
+            result,
+            MetadataValues.Deserialize(reader.GetString(reader.GetOrdinal("metadata_json"))));
     }
 
     private bool TaskExists(SqliteConnection connection, string id)
@@ -530,14 +535,16 @@ public sealed class SqliteStore : ITaskStore, IDisposable
                 command.Transaction = transaction;
                 command.CommandText =
                     """
-                    INSERT INTO graphs(id, title, created_at)
-                    VALUES ($id, $title, $created_at)
+                    INSERT INTO graphs(id, title, metadata_json, created_at)
+                    VALUES ($id, $title, $metadata_json, $created_at)
                     ON CONFLICT(id) DO UPDATE SET
                         title = excluded.title,
+                        metadata_json = excluded.metadata_json,
                         created_at = excluded.created_at;
                     """;
                 command.Parameters.AddWithValue("$id", graph.Id);
                 command.Parameters.AddWithValue("$title", graph.Title);
+                command.Parameters.AddWithValue("$metadata_json", MetadataValues.Serialize(graph.Metadata));
                 command.Parameters.AddWithValue("$created_at", Format(graph.CreatedAt));
                 command.ExecuteNonQuery();
             }
@@ -582,17 +589,19 @@ public sealed class SqliteStore : ITaskStore, IDisposable
         private TaskGraph LoadGraph(SqliteConnection connection, string id)
         {
             string title;
+            IReadOnlyDictionary<string, object?> metadata;
             DateTimeOffset createdAt;
             using (var command = connection.CreateCommand())
             {
-                command.CommandText = "SELECT title, created_at FROM graphs WHERE id = $id";
+                command.CommandText = "SELECT title, metadata_json, created_at FROM graphs WHERE id = $id";
                 command.Parameters.AddWithValue("$id", id);
                 using var reader = command.ExecuteReader();
                 if (!reader.Read())
                     throw new KeyNotFoundException($"Graph '{id}' was not found.");
 
                 title = reader.GetString(0);
-                createdAt = ParseDateTimeOffset(reader.GetString(1));
+                metadata = MetadataValues.Deserialize(reader.GetString(1));
+                createdAt = ParseDateTimeOffset(reader.GetString(2));
             }
 
             var nodeRows = new List<(string TaskId, bool Finally, bool Required)>();
@@ -617,7 +626,7 @@ public sealed class SqliteStore : ITaskStore, IDisposable
                 nodes.Add(new TaskGraphNodeSnapshot(tasksById[row.TaskId], dependencies, row.Finally, row.Required));
             }
 
-            return TaskGraph.Restore(id, title, createdAt, nodes);
+            return TaskGraph.Restore(id, title, createdAt, nodes, metadata);
         }
 
         private static IReadOnlyList<string> LoadDependencyIds(SqliteConnection connection, string graphId, string taskId)

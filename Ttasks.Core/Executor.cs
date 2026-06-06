@@ -154,12 +154,13 @@ public sealed class TaskExecutor : IDisposable
             _handlers[type] = handler;
     }
 
-    public TaskResult Execute(Task task, RetryPolicy? retryPolicy = null, IReadOnlyDictionary<string, Task>? upstream = null)
+    public TaskResult Execute(Task task, RetryPolicy? retryPolicy = null, IReadOnlyDictionary<string, Task>? upstream = null, IReadOnlyList<Task>? orderedUpstream = null)
     {
         ArgumentNullException.ThrowIfNull(task);
         retryPolicy ??= new RetryPolicy(1, 0);
         ValidateRetryPolicy(retryPolicy);
-        var upstreamSnapshot = SnapshotUpstream(upstream);
+        var upstreamSnapshot = SnapshotUpstream(upstream, orderedUpstream);
+        var orderedUpstreamSnapshot = SnapshotOrderedUpstream(upstreamSnapshot, orderedUpstream);
 
         if (task.Status == TaskStatus.Cancelled)
             throw new OperationCanceledException("Task is already cancelled.");
@@ -199,7 +200,7 @@ public sealed class TaskExecutor : IDisposable
             try
             {
                 var startedAt = DateTimeOffset.UtcNow;
-                var context = new TaskContext(task, this, upstreamSnapshot, cts.Token);
+                var context = new TaskContext(task, this, upstreamSnapshot, cts.Token, orderedUpstreamSnapshot);
                 var raw = handler(context);
                 cts.Token.ThrowIfCancellationRequested();
                 var normalized = NormalizeResult(raw);
@@ -295,7 +296,7 @@ public sealed class TaskExecutor : IDisposable
         throw new InvalidOperationException("Retry loop exhausted.");
     }
 
-    public SubmittedTask Submit(Task task, RetryPolicy? retryPolicy = null, IReadOnlyDictionary<string, Task>? upstream = null)
+    public SubmittedTask Submit(Task task, RetryPolicy? retryPolicy = null, IReadOnlyDictionary<string, Task>? upstream = null, IReadOnlyList<Task>? orderedUpstream = null)
     {
         ArgumentNullException.ThrowIfNull(task);
         retryPolicy ??= new RetryPolicy(1, 0);
@@ -307,8 +308,8 @@ public sealed class TaskExecutor : IDisposable
                 throw new InvalidOperationException("Executor is shut down.");
         }
 
-        var upstreamSnapshot = SnapshotUpstream(upstream);
-        var submitted = new SubmittedTask(this, task, retryPolicy, upstreamSnapshot);
+        var upstreamSnapshot = SnapshotUpstream(upstream, orderedUpstream);
+        var submitted = new SubmittedTask(this, task, retryPolicy, upstreamSnapshot, SnapshotOrderedUpstream(upstreamSnapshot, orderedUpstream));
         lock (_gate)
             _submitted.Add(submitted.InnerTask);
         submitted.InnerTask.ContinueWith(
@@ -639,8 +640,20 @@ public sealed class TaskExecutor : IDisposable
 
     private sealed record ShellCommand(string FileName, IReadOnlyList<string> Arguments);
 
-    private static IReadOnlyDictionary<string, Task> SnapshotUpstream(IReadOnlyDictionary<string, Task>? upstream) =>
-        upstream?.ToDictionary(kvp => kvp.Key, kvp => kvp.Value, StringComparer.Ordinal) ?? new Dictionary<string, Task>(StringComparer.Ordinal);
+    private static IReadOnlyDictionary<string, Task> SnapshotUpstream(IReadOnlyDictionary<string, Task>? upstream, IReadOnlyList<Task>? orderedUpstream)
+    {
+        var snapshot = upstream?.ToDictionary(kvp => kvp.Key, kvp => kvp.Value, StringComparer.Ordinal) ?? new Dictionary<string, Task>(StringComparer.Ordinal);
+        if (orderedUpstream is null)
+            return snapshot;
+
+        foreach (var task in orderedUpstream)
+            snapshot.TryAdd(task.Id, task);
+        return snapshot;
+    }
+
+    private static IReadOnlyList<Task> SnapshotOrderedUpstream(IReadOnlyDictionary<string, Task> upstream, IReadOnlyList<Task>? orderedUpstream) =>
+        orderedUpstream?.ToList().AsReadOnly()
+        ?? upstream.OrderBy(kvp => kvp.Key, StringComparer.Ordinal).Select(kvp => kvp.Value).ToList().AsReadOnly();
 
     private static void SleepBackoff(Task task, double backoffSeconds)
     {
@@ -701,14 +714,14 @@ public sealed class SubmittedTask
 {
     private int _started;
 
-    internal SubmittedTask(TaskExecutor executor, Task task, RetryPolicy retryPolicy, IReadOnlyDictionary<string, Task> upstream)
+    internal SubmittedTask(TaskExecutor executor, Task task, RetryPolicy retryPolicy, IReadOnlyDictionary<string, Task> upstream, IReadOnlyList<Task> orderedUpstream)
     {
         Executor = executor;
         Task = task;
         InnerTask = System.Threading.Tasks.Task.Run(() =>
         {
             Interlocked.Exchange(ref _started, 1);
-            return executor.Execute(task, retryPolicy, upstream);
+            return executor.Execute(task, retryPolicy, upstream, orderedUpstream);
         });
     }
 
@@ -733,14 +746,16 @@ public sealed class SubmittedTask
 public sealed class TaskContext
 {
     private readonly IReadOnlyDictionary<string, Task> _upstream;
+    private readonly IReadOnlyList<Task> _upstreamTasks;
     private readonly CancellationToken _cancellationToken;
 
-    public TaskContext(Task task, TaskExecutor executor, IReadOnlyDictionary<string, Task>? upstream = null, CancellationToken cancellationToken = default)
+    public TaskContext(Task task, TaskExecutor executor, IReadOnlyDictionary<string, Task>? upstream = null, CancellationToken cancellationToken = default, IReadOnlyList<Task>? orderedUpstream = null)
     {
         Task = task ?? throw new ArgumentNullException(nameof(task));
         Executor = executor ?? throw new ArgumentNullException(nameof(executor));
         _upstream = new System.Collections.ObjectModel.ReadOnlyDictionary<string, Task>(
             upstream?.ToDictionary(kvp => kvp.Key, kvp => kvp.Value, StringComparer.Ordinal) ?? new Dictionary<string, Task>(StringComparer.Ordinal));
+        _upstreamTasks = (orderedUpstream?.ToList() ?? _upstream.Values.ToList()).AsReadOnly();
         _cancellationToken = cancellationToken;
     }
 
@@ -756,6 +771,7 @@ public sealed class TaskContext
     public Task Task { get; }
     public TaskExecutor Executor { get; }
     public IReadOnlyDictionary<string, Task> Upstream => _upstream;
+    public IReadOnlyList<Task> UpstreamTasks => _upstreamTasks;
 
     public void RaiseIfCancelled()
     {

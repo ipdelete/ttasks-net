@@ -212,6 +212,26 @@ documents, not by hand-asserting against this index.
 | R-COP-24   | IMPL-DEFINED  | Permission handling is `IMPL-DEFINED` but documented     |       |
 | R-COP-25   | MAY           | Copilot integration is optional                          |       |
 
+### Agent-authored graphs (`agent-graphs.md`)
+
+| ID              | Level        | Summary                                             | Notes |
+| --------------- | ------------ | --------------------------------------------------- | ----- |
+| R-AGENTGRAPH-01 | MUST         | Planner output is data, not authority               |       |
+| R-AGENTGRAPH-02 | MUST         | Host validation gates capabilities                  |       |
+| R-AGENTGRAPH-03 | MUST         | Planner ids are stable semantic handles             |       |
+| R-AGENTGRAPH-04 | MUST         | Metadata is lifecycle-neutral                       |       |
+| R-AGENTGRAPH-05 | MUST         | Metadata keys and values are constrained            |       |
+| R-AGENTGRAPH-06 | MUST         | Stores roundtrip metadata                           |       |
+| R-AGENTGRAPH-07 | MUST         | Graph metadata is persisted with graph topology     |       |
+| R-AGENTGRAPH-08 | SHOULD       | Metadata deletion is explicit                       |       |
+| R-AGENTGRAPH-09 | MUST         | Graphs pass direct upstream tasks to handlers       | Cross-ref R-GRAPH-24 |
+| R-AGENTGRAPH-10 | MUST         | Upstream inclusion is opt-in per handler or task    |       |
+| R-AGENTGRAPH-11 | MUST         | Upstream envelopes are deterministic                | Preserve dependency order |
+| R-AGENTGRAPH-12 | MUST         | Upstream composition preserves payload separation   |       |
+| R-AGENTGRAPH-13 | MUST         | Upstream composition excludes raw results by default|       |
+| R-AGENTGRAPH-14 | MUST         | Missing upstream results remain visible             |       |
+| R-AGENTGRAPH-15 | SHOULD       | Upstream composition is available to PROMPT/AGENT   |       |
+
 ## Reserved id prefixes
 
 | Prefix    | Area               |
@@ -223,6 +243,7 @@ documents, not by hand-asserting against this index.
 | `R-GRAPH-`| Graph              |
 | `R-STORE-`| Store              |
 | `R-COP-`  | Copilot session    |
+| `R-AGENTGRAPH-` | Agent-authored graphs |
 
 New areas append a new prefix; existing prefixes never change meaning.
 

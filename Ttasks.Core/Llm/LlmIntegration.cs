@@ -1,4 +1,5 @@
 using GitHub.Copilot;
+using System.Text.Json;
 
 namespace Ttasks.Core;
 
@@ -47,6 +48,7 @@ public sealed class LlmHandlerOptions
     public string PermissionPolicy { get; init; } = LlmPermissionPolicies.ApproveAll;
     public string? ReasoningEffort { get; init; }
     public string? WorkingDirectory { get; init; }
+    public bool IncludeUpstreamResults { get; init; }
     public IReadOnlyDictionary<string, object?> AdditionalOptions { get; init; } = new Dictionary<string, object?>();
 }
 
@@ -69,6 +71,7 @@ public interface ILlmSession : IDisposable, IAsyncDisposable
 
 public static class CopilotHandlers
 {
+    private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
     public const string DefaultPromptModel = "gpt-5.4-mini";
     public static readonly TimeSpan DefaultPromptTimeout = TimeSpan.FromSeconds(60);
     public const string DefaultAgentModel = "gpt-5.5";
@@ -112,24 +115,52 @@ public static class CopilotHandlers
             AdditionalOptions = options.AdditionalOptions
         });
         context.RaiseIfCancelled();
-        var request = CreateRequest(context, model, defaultTimeout, toolsEnabled, options.PermissionPolicy);
+        var request = CreateRequest(context, model, defaultTimeout, toolsEnabled, options.PermissionPolicy, options.IncludeUpstreamResults);
         var result = SendBlocking(session, request, context.CancellationToken);
         context.RaiseIfCancelled();
         return result;
     }
 
-    internal static LlmTurnRequest CreateRequest(TaskContext context, string model, TimeSpan? defaultTimeout, bool toolsEnabled, string permissionPolicy)
+    internal static LlmTurnRequest CreateRequest(TaskContext context, string model, TimeSpan? defaultTimeout, bool toolsEnabled, string permissionPolicy, bool includeUpstreamResults = false)
     {
         var timeout = context.Timeout.HasValue ? TimeSpan.FromSeconds(context.Timeout.Value) : defaultTimeout;
         return new LlmTurnRequest
         {
-            Prompt = context.Payload,
+            Prompt = includeUpstreamResults ? ComposePromptWithUpstream(context) : context.Payload,
             Model = model,
             ToolsEnabled = toolsEnabled,
             Timeout = timeout,
             PermissionPolicy = permissionPolicy
         };
     }
+
+    internal static string ComposePromptWithUpstream(TaskContext context) =>
+        $"Instruction:\n{context.Payload}\n\nUpstream results:\n{JsonSerializer.Serialize(CreateUpstreamEnvelope(context), JsonOptions)}";
+
+    private static IReadOnlyList<UpstreamEnvelopeEntry> CreateUpstreamEnvelope(TaskContext context) =>
+        context.UpstreamTasks.Select(task => new UpstreamEnvelopeEntry(
+            task.Id,
+            task.Title,
+            task.Description,
+            task.TypeName,
+            task.Status.ToString(),
+            task.Result?.Output ?? string.Empty,
+            task.Result?.Error,
+            task.Result?.ReturnCode,
+            task.Result?.TerminationReason,
+            task.Metadata)).ToList();
+
+    private sealed record UpstreamEnvelopeEntry(
+        string Id,
+        string Title,
+        string Description,
+        string Type,
+        string Status,
+        string Output,
+        string? Error,
+        int? ReturnCode,
+        string? TerminationReason,
+        IReadOnlyDictionary<string, object?> Metadata);
 
     internal static string SendBlocking(ILlmSession session, LlmTurnRequest request, CancellationToken cancellationToken)
     {
