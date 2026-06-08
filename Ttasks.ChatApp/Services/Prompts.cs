@@ -6,6 +6,15 @@ internal static class Prompts
 {
     private static readonly JsonSerializerOptions WriteIndented = new(JsonSerializerDefaults.Web) { WriteIndented = true };
 
+    public const string UnstructuredToolGuidance =
+        """
+        Unstructured CLI tools (no `JSON:` fact-line in help):
+        - Treat the tool's stdout as opaque text. Do not try to navigate JSON paths against it.
+        - To pipe a text tool's whole output to a downstream task, use `${{ tasks.<id>.output }}` with no path.
+        - To extract a specific value from text output, insert a `prompt` task between the text tool and the consuming task. Have the prompt return only the value (no prose, no quotes), then reference that prompt task: `${{ tasks.<promptTaskId>.output }}`. Declare an edge from the text tool to the prompt task and from the prompt task to the consumer.
+        - When in doubt about a tool's output shape, run `<tool> --help` first; tools that emit structured output document the JSON shape with a `JSON:` fact-line.
+        """;
+
     public const string DynamicBindingGuidance =
         """
         Dynamic parameter binding:
@@ -106,6 +115,8 @@ internal static class Prompts
 
         {{DynamicBindingGuidance}}
 
+        {{UnstructuredToolGuidance}}
+
         {{HelpDrivenCraftingGuidance}}
 
         ## Repair loop
@@ -204,6 +215,8 @@ internal static class Prompts
 
         {{DynamicBindingGuidance}}
 
+        {{UnstructuredToolGuidance}}
+
         {{HelpDrivenCraftingGuidance}}
 
         {{CompleteResultGuidance}}
@@ -231,6 +244,10 @@ internal static class Prompts
         Return JSON only. Do not wrap it in Markdown.
 
         Use the same schema and rules as the normal planner. Prefer changing only what is needed to recover from the failure. Do not repeat a failed command shape without changing it.
+
+        {{DynamicBindingGuidance}}
+
+        {{UnstructuredToolGuidance}}
 
         {{HelpDrivenCraftingGuidance}}
 

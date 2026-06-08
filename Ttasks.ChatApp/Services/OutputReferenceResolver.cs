@@ -71,9 +71,11 @@ internal static partial class OutputReferenceResolver
         {
             current = JsonNode.Parse(raw);
         }
-        catch (JsonException ex)
+        catch (JsonException)
         {
-            throw new InvalidOperationException($"Upstream output is not valid JSON; cannot navigate path '{remaining}'. {ex.Message}");
+            throw new InvalidOperationException(
+                $"Upstream task output is not JSON; cannot navigate path '{remaining}'. "
+                + "Pass the raw output with ${{ tasks.<id>.output }} instead, or insert a prompt task that parses the text and reference that prompt's output downstream.");
         }
         if (current is null)
             throw new InvalidOperationException("Upstream output parsed as null.");

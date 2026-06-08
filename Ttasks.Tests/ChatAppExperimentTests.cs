@@ -320,6 +320,22 @@ public sealed class ChatAppExperimentTests
     }
 
     [Fact]
+    public void OutputReferenceResolver_Gives_Friendly_Error_When_Upstream_Is_Not_Json()
+    {
+        var upstream = new Dictionary<string, string>(StringComparer.Ordinal)
+        {
+            ["plain"] = "This is just plain text output."
+        };
+
+        var ex = Assert.Throws<InvalidOperationException>(() =>
+            OutputReferenceResolver.Resolve("${{ tasks.plain.output.field }}", upstream));
+
+        Assert.Contains("is not JSON", ex.Message);
+        Assert.Contains("${{ tasks.<id>.output }}", ex.Message);
+        Assert.Contains("prompt task", ex.Message);
+    }
+
+    [Fact]
     public void OutputReferenceResolver_Resolves_Json_Path_From_Upstream_Output()
     {
         var upstream = new Dictionary<string, string>(StringComparer.Ordinal)
