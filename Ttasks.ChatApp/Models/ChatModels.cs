@@ -22,6 +22,11 @@ public sealed record RouteDecision(
     string? Answer,
     string? PlanIntent);
 
+public sealed record ContinuationDecision(
+    string Mode,
+    string? Answer,
+    GraphPlan? Plan);
+
 public sealed record GraphPlan(
     GraphPlanInfo Graph,
     List<GraphPlanTask> Tasks,

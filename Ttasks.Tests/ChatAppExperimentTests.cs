@@ -202,6 +202,7 @@ public sealed class ChatAppExperimentTests
             var options = Options.Create(new ChatAppOptions
             {
                 MaxGraphRepairAttempts = 1,
+                MaxContinuationBatches = 0,
                 AllowedTools = [new AllowedToolConfig { Prefix = "mail" }]
             });
             var service = CreateChatTurnService(provider, store, library, options);
@@ -231,6 +232,85 @@ public sealed class ChatAppExperimentTests
                 turn.Tasks.Select(task => task.Kind));
             Assert.All(turn.Tasks.Where(task => task.Kind != "router"), task => Assert.NotNull(task.Attempt));
             Assert.Null(turn.Tasks.Single(task => task.Kind == "router").Attempt);
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("PATH", originalPath);
+            Directory.Delete(toolDir, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void Chat_App_Continuation_Loop_Runs_Multiple_Batches_With_Upstream_Data()
+    {
+        var toolDir = Path.Combine(Path.GetTempPath(), $"ttasks-fake-teams-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(toolDir);
+        File.WriteAllText(Path.Combine(toolDir, "teams.cmd"),
+            "@echo off\r\n" +
+            "if \"%1\"==\"chat-list\" ( echo {\"chats\":[{\"id\":\"19:abc@thread.v2\",\"topic\":\"aet swe\"}]} & exit /b 0 )\r\n" +
+            "if \"%1\"==\"read\" ( echo {\"messages\":[{\"from\":\"alice\",\"text\":\"hello\"}]} & exit /b 0 )\r\n" +
+            "exit /b 1\r\n");
+        var originalPath = Environment.GetEnvironmentVariable("PATH");
+        var provider = new RecordingLlmProvider();
+        // 1. router
+        provider.QueueResult(LlmTurnResult.Text("""{"mode":"graph","answer":null,"planIntent":"discover aet swe chat then read"}"""));
+        // 2. planner batch 1: discovery
+        provider.QueueResult(LlmTurnResult.Text("""
+            {
+              "graph": { "title": "Discover" },
+              "tasks": [
+                { "id": "find", "type": "process", "process": { "fileName": "teams", "args": ["chat-list", "--topic", "aet swe"] } },
+                { "id": "summary", "type": "prompt", "prompt": "summarize discovery" }
+              ],
+              "edges": [{ "from": "find", "to": "summary" }]
+            }
+            """));
+        // 3. summary prompt output (graph executor)
+        provider.QueueResult(LlmTurnResult.Text("discovered chat 19:abc@thread.v2"));
+        // 4. continuation decision: run another batch
+        provider.QueueResult(LlmTurnResult.Text("""
+            {
+              "mode": "graph",
+              "plan": {
+                "graph": { "title": "Read" },
+                "tasks": [
+                  { "id": "read", "type": "process", "process": { "fileName": "teams", "args": ["read", "19:abc@thread.v2"] } },
+                  { "id": "summary", "type": "prompt", "prompt": "summarize messages" }
+                ],
+                "edges": [{ "from": "read", "to": "summary" }]
+              }
+            }
+            """));
+        // 5. summary prompt output (graph executor for batch 2)
+        provider.QueueResult(LlmTurnResult.Text("alice said hello"));
+        // 6. continuation decision: done
+        provider.QueueResult(LlmTurnResult.Text("""{"mode":"answer","answer":"AET SWE chat: alice said hello"}"""));
+
+        try
+        {
+            Environment.SetEnvironmentVariable("PATH", toolDir + Path.PathSeparator + originalPath);
+            var store = new InMemoryStore();
+            var library = new StoreBackedTaskLibrary(store);
+            var options = Options.Create(new ChatAppOptions
+            {
+                MaxGraphRepairAttempts = 0,
+                MaxContinuationBatches = 2,
+                AllowedTools = [new AllowedToolConfig { Prefix = "teams chat-list" }, new AllowedToolConfig { Prefix = "teams read" }]
+            });
+            var service = CreateChatTurnService(provider, store, library, options);
+
+            var response = service.Handle("page-1", "what's latest on the aet swe chat");
+
+            Assert.Equal("AET SWE chat: alice said hello", response.Answer);
+            Assert.Equal(6, provider.Requests.Count);
+
+            var admin = new AdminService(store, library, options);
+            var turnSummary = Assert.Single(admin.RecentTurns());
+            var turn = admin.GetTurn(turnSummary.TurnId);
+            var continuationTasks = turn.Tasks.Where(task => task.Kind == "continuation").ToList();
+            Assert.Equal(2, continuationTasks.Count);
+            Assert.Contains(continuationTasks, task => task.Title == "Continuation decision for batch 2");
+            Assert.Contains(continuationTasks, task => task.Title == "Continuation decision for batch 3");
         }
         finally
         {

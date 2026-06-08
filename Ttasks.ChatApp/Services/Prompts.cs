@@ -6,6 +6,15 @@ internal static class Prompts
 {
     private static readonly JsonSerializerOptions WriteIndented = new(JsonSerializerDefaults.Web) { WriteIndented = true };
 
+    public const string HelpDrivenCraftingGuidance =
+        """
+        Help-driven command crafting:
+        - For any `process` task on an allowed tool whose flag/positional-argument shape you are not certain of, first run `<tool> --help` (or the tool's documented helpCommand) as its own process task in the same plan.
+        - Be meticulous: positional arguments are required without flags, flag names differ between subcommands, and discovery commands rarely share flags with read commands.
+        - Use the help output to craft the real command in a follow-up plan/batch. Do not guess flag names.
+        - When in doubt about a tool's surface, prefer a small help-then-act mini-graph over a confident wrong command.
+        """;
+
     public const string CompleteResultGuidance =
         """
         Complete-result strategy:
@@ -68,6 +77,8 @@ internal static class Prompts
         - A fully-qualified command like `az account list` exposes only that exact command.
 
         Never invent identifiers (chat IDs, channel IDs, mail folders, calendar IDs, paths, URLs) that the user did not provide.
+
+        {{HelpDrivenCraftingGuidance}}
 
         ## Repair loop
 
@@ -163,6 +174,8 @@ internal static class Prompts
         - Independent reads should fan out. Add one final prompt task that summarizes upstream outputs and depends on all reads.
         - Use stable semantic task ids.
 
+        {{HelpDrivenCraftingGuidance}}
+
         {{CompleteResultGuidance}}
 
         Allowed tools:
@@ -188,6 +201,50 @@ internal static class Prompts
         Return JSON only. Do not wrap it in Markdown.
 
         Use the same schema and rules as the normal planner. Prefer changing only what is needed to recover from the failure. Do not repeat a failed command shape without changing it.
+
+        {{HelpDrivenCraftingGuidance}}
+
+        {{CompleteResultGuidance}}
+
+        Allowed tools:
+        {{FormatAllowedTools(capabilities.AllowedTools)}}
+
+        Library suggestions for this turn:
+        {{FormatLibrarySuggestions(capabilities.LibrarySuggestions)}}
+        """;
+
+    public static string Continuation(string userMessage, string planIntent, CapabilitySet capabilities, string batchHistory) =>
+        $$"""
+        You have already executed one or more graph batches for this chat turn. Decide whether to:
+        - Return a final answer to the user, OR
+        - Run another batch (for example, to use results from the previous batch as inputs to a follow-up tool call).
+
+        Original user request:
+        {{userMessage}}
+
+        Intent:
+        {{planIntent}}
+
+        Batch history (previous batches with task outputs):
+        {{batchHistory}}
+
+        Return JSON only. Do not wrap it in Markdown.
+
+        If you can answer the user's request now:
+        {
+          "mode": "answer",
+          "answer": "final answer text using upstream task outputs"
+        }
+
+        If you need another batch (because upstream outputs revealed identifiers, pages, or follow-up reads you couldn't statically plan):
+        {
+          "mode": "graph",
+          "plan": { "graph": { "title": "..." }, "tasks": [ ... ], "edges": [ ... ] }
+        }
+
+        Same plan schema and rules as the normal planner apply. You may use outputs from the batch history (for example, chat ids returned by a `chat-list` task) as positional or flag values in the next batch.
+
+        {{HelpDrivenCraftingGuidance}}
 
         {{CompleteResultGuidance}}
 

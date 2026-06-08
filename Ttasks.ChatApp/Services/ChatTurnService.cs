@@ -11,6 +11,7 @@ public sealed class ChatTurnService
     internal const string TurnIdKey = "turnId";
     internal const string TaskKindKey = "kind";
     internal const string AttemptKey = "attempt";
+    internal const string BatchKey = "batch";
     internal const string SessionIdKey = "sessionId";
 
     private readonly ILlmProvider _provider;
@@ -68,11 +69,11 @@ public sealed class ChatTurnService
         if (capabilities.AllowedTools.Count == 0)
             return new ChatResponse("answer", capabilities.EmptyMessage, activeSessionId);
 
-        var attempt = RunGraphAttempts(executor, llmSession, activeSessionId, turnId, userMessage, route.PlanIntent ?? userMessage, capabilities);
-        return new ChatResponse("graph", attempt.Answer, activeSessionId, attempt.GraphId, attempt.Tasks);
+        var turnState = RunTurn(executor, llmSession, activeSessionId, turnId, userMessage, route.PlanIntent ?? userMessage, capabilities);
+        return new ChatResponse("graph", turnState.Answer, activeSessionId, turnState.LastGraphId, turnState.Tasks);
     }
 
-    private GraphAttemptOutcome RunGraphAttempts(
+    private TurnState RunTurn(
         TaskExecutor planningExecutor,
         LlmAgentSession llmSession,
         string sessionId,
@@ -81,70 +82,211 @@ public sealed class ChatTurnService
         string planIntent,
         CapabilitySet capabilities)
     {
-        GraphAttemptOutcome? lastAttempt = null;
+        var batchHistory = new List<BatchSummary>();
+        var allTasks = new List<ChatTaskSummary>();
+        string? lastGraphId = null;
+        string? finalAnswer = null;
+        var maxBatches = Math.Max(1, _options.MaxContinuationBatches + 1);
+
+        for (var batchNumber = 1; batchNumber <= maxBatches; batchNumber++)
+        {
+            GraphPlan? plan;
+            if (batchNumber == 1)
+            {
+                plan = TryGetPlan(
+                    planningExecutor,
+                    () => Prompts.Planner(planIntent, capabilities, _options.DefaultTimeoutSeconds),
+                    title: "Plan graph",
+                    turnId,
+                    sessionId,
+                    "planner",
+                    batchNumber,
+                    attempt: 1,
+                    out var planError);
+                if (plan is null)
+                {
+                    finalAnswer = $"Attempt 1 failed before graph execution: {planError}";
+                    break;
+                }
+            }
+            else
+            {
+                var continuationDecision = AskContinuation(planningExecutor, userMessage, planIntent, capabilities, batchHistory, turnId, sessionId, batchNumber);
+                if (continuationDecision.Mode.Equals("answer", StringComparison.OrdinalIgnoreCase))
+                {
+                    finalAnswer = continuationDecision.Answer ?? string.Empty;
+                    break;
+                }
+                if (!continuationDecision.Mode.Equals("graph", StringComparison.OrdinalIgnoreCase) || continuationDecision.Plan is null)
+                {
+                    finalAnswer = $"Continuation step {batchNumber} returned an unrecognized response.";
+                    break;
+                }
+                plan = continuationDecision.Plan;
+            }
+
+            var batchOutcome = ExecuteBatchWithRepair(planningExecutor, llmSession, plan, capabilities, turnId, sessionId, batchNumber);
+            allTasks.AddRange(batchOutcome.Tasks);
+            if (batchOutcome.GraphId is not null)
+                lastGraphId = batchOutcome.GraphId;
+            batchHistory.Add(new BatchSummary(batchNumber, batchOutcome.Tasks, batchOutcome.Ok));
+
+            if (!batchOutcome.Ok)
+            {
+                finalAnswer = string.IsNullOrWhiteSpace(batchOutcome.Answer)
+                    ? DescribeGraphFailure(batchOutcome.Tasks)
+                    : batchOutcome.Answer;
+                break;
+            }
+
+            if (batchNumber == maxBatches)
+            {
+                finalAnswer = string.IsNullOrWhiteSpace(batchOutcome.Answer)
+                    ? "Reached the continuation budget without a final answer."
+                    : batchOutcome.Answer;
+                break;
+            }
+        }
+
+        return new TurnState(finalAnswer ?? "The graph did not produce a final answer.", lastGraphId, allTasks);
+    }
+
+    private ContinuationDecision AskContinuation(
+        TaskExecutor executor,
+        string userMessage,
+        string planIntent,
+        CapabilitySet capabilities,
+        IReadOnlyList<BatchSummary> batchHistory,
+        string turnId,
+        string sessionId,
+        int batchNumber)
+    {
+        var continuationTask = CoreTask.Prompt(
+            Prompts.Continuation(userMessage, planIntent, capabilities, FormatBatchHistory(batchHistory)),
+            title: $"Continuation decision for batch {batchNumber}",
+            metadata: TurnMetadataWithBatch(turnId, sessionId, "continuation", batchNumber, attempt: 1));
+        var json = executor.Execute(continuationTask).Output;
+        return ParseJson<ContinuationDecision>(json);
+    }
+
+    private GraphPlan? TryGetPlan(
+        TaskExecutor executor,
+        Func<string> promptFactory,
+        string title,
+        string turnId,
+        string sessionId,
+        string kind,
+        int batchNumber,
+        int attempt,
+        out string? error)
+    {
+        try
+        {
+            var task = CoreTask.Prompt(
+                promptFactory(),
+                title: title,
+                metadata: TurnMetadataWithBatch(turnId, sessionId, kind, batchNumber, attempt));
+            var json = executor.Execute(task).Output;
+            var plan = ParseJson<GraphPlan>(json);
+            error = null;
+            return plan;
+        }
+        catch (Exception ex) when (ex is JsonException or InvalidOperationException)
+        {
+            error = ex.Message;
+            return null;
+        }
+    }
+
+    private BatchOutcome ExecuteBatchWithRepair(
+        TaskExecutor planningExecutor,
+        LlmAgentSession llmSession,
+        GraphPlan initialPlan,
+        CapabilitySet capabilities,
+        string turnId,
+        string sessionId,
+        int batchNumber)
+    {
+        var allTasks = new List<ChatTaskSummary>();
+        string? lastGraphId = null;
+        var plan = initialPlan;
         var repairContext = string.Empty;
         var maxAttempts = Math.Max(1, _options.MaxGraphRepairAttempts + 1);
 
-        for (var attemptNumber = 1; attemptNumber <= maxAttempts; attemptNumber++)
+        for (var attempt = 1; attempt <= maxAttempts; attempt++)
         {
             try
             {
-                var isRepair = !string.IsNullOrWhiteSpace(repairContext);
-                var prompt = isRepair
-                    ? Prompts.Repair(userMessage, planIntent, capabilities, repairContext)
-                    : Prompts.Planner(planIntent, capabilities, _options.DefaultTimeoutSeconds);
-                var plannerTask = CoreTask.Prompt(
-                    prompt,
-                    title: isRepair ? $"Repair plan attempt {attemptNumber}" : "Plan graph",
-                    metadata: TurnMetadata(turnId, sessionId, isRepair ? "repair" : "planner", attemptNumber));
-                var planJson = planningExecutor.Execute(plannerTask).Output;
-                var plan = ParseJson<GraphPlan>(planJson);
                 ResolveLibraryReferences(plan, capabilities);
                 _validator.Validate(plan, capabilities);
 
                 var graphExecutor = CreatePromptExecutor(llmSession, includeUpstreamResults: true, _store);
                 RegisterProcessHandler(graphExecutor);
                 var graph = _builder.Build(plan);
-                TagGraphTasks(graph, turnId, sessionId, attemptNumber);
+                TagGraphTasks(graph, turnId, sessionId, batchNumber, attempt);
                 graph.Run(graphExecutor, maxWorkers: _options.MaxWorkers);
 
-                lastAttempt = ToOutcome(graph);
+                var snapshot = ToOutcome(graph);
+                allTasks.AddRange(snapshot.Tasks);
+                lastGraphId = graph.Id;
+
                 if (graph.Ok)
                 {
                     PromoteLibrarySuggestions(plan, graph);
-                    return lastAttempt;
+                    return new BatchOutcome(true, snapshot.Answer, lastGraphId, allTasks);
                 }
 
-                repairContext = CreateFailureObservation(attemptNumber, planJson, plan, lastAttempt.Tasks);
+                repairContext = CreateFailureObservation(attempt, plan, snapshot.Tasks);
+                if (attempt == maxAttempts)
+                    return new BatchOutcome(false, snapshot.Answer, lastGraphId, allTasks);
+
+                var repaired = TryGetPlan(
+                    planningExecutor,
+                    () => Prompts.Repair(string.Empty, string.Empty, capabilities, repairContext),
+                    title: $"Repair plan attempt {attempt + 1}",
+                    turnId,
+                    sessionId,
+                    "repair",
+                    batchNumber,
+                    attempt + 1,
+                    out var repairError);
+                if (repaired is null)
+                    return new BatchOutcome(false, $"Repair attempt {attempt + 1} failed to parse: {repairError}", lastGraphId, allTasks);
+                plan = repaired;
             }
-            catch (Exception ex) when (ex is JsonException or ArgumentException or InvalidOperationException)
+            catch (Exception ex) when (ex is ArgumentException or InvalidOperationException)
             {
-                var tasks = lastAttempt?.Tasks ?? [];
-                repairContext = CreateFailureObservation(attemptNumber, ex, tasks);
-                lastAttempt = new GraphAttemptOutcome(
-                    $"Attempt {attemptNumber} failed before graph execution: {ex.Message}",
-                    null,
-                    tasks);
+                if (attempt == maxAttempts)
+                    return new BatchOutcome(false, $"Attempt {attempt} failed before graph execution: {ex.Message}", lastGraphId, allTasks);
+
+                repairContext = CreateFailureObservation(attempt, ex);
+                var repaired = TryGetPlan(
+                    planningExecutor,
+                    () => Prompts.Repair(string.Empty, string.Empty, capabilities, repairContext),
+                    title: $"Repair plan attempt {attempt + 1}",
+                    turnId,
+                    sessionId,
+                    "repair",
+                    batchNumber,
+                    attempt + 1,
+                    out var repairError);
+                if (repaired is null)
+                    return new BatchOutcome(false, $"Repair attempt {attempt + 1} failed to parse: {repairError}", lastGraphId, allTasks);
+                plan = repaired;
             }
         }
 
-        return lastAttempt is null
-            ? new GraphAttemptOutcome("The graph did not produce a final answer.", null, [])
-            : lastAttempt with
-            {
-                Answer = string.IsNullOrWhiteSpace(lastAttempt.Answer)
-                    ? DescribeGraphFailure(lastAttempt.Tasks)
-                    : lastAttempt.Answer
-            };
+        return new BatchOutcome(false, "Batch exhausted repair attempts without success.", lastGraphId, allTasks);
     }
 
-    private static void TagGraphTasks(TaskGraph graph, string turnId, string sessionId, int attemptNumber)
+    private static void TagGraphTasks(TaskGraph graph, string turnId, string sessionId, int batchNumber, int attemptNumber)
     {
         foreach (var task in graph.Members)
         {
             task.SetMetadata(TurnIdKey, turnId);
             task.SetMetadata(SessionIdKey, sessionId);
             task.SetMetadata(AttemptKey, attemptNumber);
+            task.SetMetadata(BatchKey, batchNumber);
             if (!task.Metadata.ContainsKey(TaskKindKey))
                 task.SetMetadata(TaskKindKey, task.Type == TaskType.Prompt ? "summary" : "process");
         }
@@ -160,6 +302,19 @@ public sealed class ChatTurnService
         };
         if (attempt is not null)
             values[AttemptKey] = attempt.Value;
+        return values;
+    }
+
+    private static IReadOnlyDictionary<string, object?> TurnMetadataWithBatch(string turnId, string sessionId, string kind, int batch, int attempt)
+    {
+        var values = new Dictionary<string, object?>(StringComparer.Ordinal)
+        {
+            [TurnIdKey] = turnId,
+            [SessionIdKey] = sessionId,
+            [TaskKindKey] = kind,
+            [AttemptKey] = attempt,
+            [BatchKey] = batch
+        };
         return values;
     }
 
@@ -183,7 +338,7 @@ public sealed class ChatTurnService
         }
     }
 
-    private static GraphAttemptOutcome ToOutcome(TaskGraph graph)
+    private static GraphSnapshot ToOutcome(TaskGraph graph)
     {
         var final = graph.Leaves().LastOrDefault(task => task.Type == TaskType.Prompt)
             ?? graph.Leaves().Last();
@@ -201,7 +356,7 @@ public sealed class ChatTurnService
         if (string.IsNullOrWhiteSpace(answer) && !graph.Ok)
             answer = DescribeGraphFailure(tasks);
 
-        return new GraphAttemptOutcome(answer ?? string.Empty, graph.Id, tasks);
+        return new GraphSnapshot(answer ?? string.Empty, tasks);
     }
 
     private static TaskExecutor CreatePromptExecutor(LlmAgentSession session, bool includeUpstreamResults, ITaskStore? store = null)
@@ -258,12 +413,29 @@ public sealed class ChatTurnService
         }
     }
 
-    private static string CreateFailureObservation(int attemptNumber, string planJson, GraphPlan plan, IReadOnlyList<ChatTaskSummary> tasks) =>
+    private static string FormatBatchHistory(IReadOnlyList<BatchSummary> batches) =>
+        JsonSerializer.Serialize(
+            batches.Select(batch => new
+            {
+                batch = batch.BatchNumber,
+                succeeded = batch.Succeeded,
+                tasks = batch.Tasks.Select(task => new
+                {
+                    task.Id,
+                    task.Type,
+                    task.Status,
+                    task.Error,
+                    task.BlockedBy,
+                    Output = Truncate(task.Output, 4000)
+                })
+            }),
+            new JsonSerializerOptions(JsonSerializerDefaults.Web) { WriteIndented = true });
+
+    private static string CreateFailureObservation(int attemptNumber, GraphPlan plan, IReadOnlyList<ChatTaskSummary> tasks) =>
         JsonSerializer.Serialize(
             new
             {
                 attempt = attemptNumber,
-                previousPlan = planJson,
                 processTasks = plan.Tasks
                     .Where(task => string.Equals(task.Type, "process", StringComparison.OrdinalIgnoreCase))
                     .Select(task => new
@@ -286,7 +458,7 @@ public sealed class ChatTurnService
             },
             new JsonSerializerOptions(JsonSerializerDefaults.Web) { WriteIndented = true });
 
-    private static string CreateFailureObservation(int attemptNumber, Exception exception, IReadOnlyList<ChatTaskSummary> tasks) =>
+    private static string CreateFailureObservation(int attemptNumber, Exception exception) =>
         JsonSerializer.Serialize(
             new
             {
@@ -295,8 +467,7 @@ public sealed class ChatTurnService
                 {
                     type = exception.GetType().Name,
                     message = exception.Message
-                },
-                tasks
+                }
             },
             new JsonSerializerOptions(JsonSerializerDefaults.Web) { WriteIndented = true });
 
@@ -340,8 +511,8 @@ public sealed class ChatTurnService
         return "The graph did not produce a final answer because one or more tasks failed:\n" + string.Join("\n", lines);
     }
 
-    private sealed record GraphAttemptOutcome(
-        string Answer,
-        string? GraphId,
-        IReadOnlyList<ChatTaskSummary> Tasks);
+    private sealed record TurnState(string Answer, string? LastGraphId, IReadOnlyList<ChatTaskSummary> Tasks);
+    private sealed record GraphSnapshot(string Answer, IReadOnlyList<ChatTaskSummary> Tasks);
+    private sealed record BatchOutcome(bool Ok, string Answer, string? GraphId, IReadOnlyList<ChatTaskSummary> Tasks);
+    private sealed record BatchSummary(int BatchNumber, IReadOnlyList<ChatTaskSummary> Tasks, bool Succeeded);
 }

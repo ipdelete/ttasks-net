@@ -8,6 +8,7 @@ public sealed class ChatAppOptions
     public int MaxWorkers { get; set; } = 3;
     public int DefaultTimeoutSeconds { get; set; } = 30;
     public int MaxGraphRepairAttempts { get; set; } = 2;
+    public int MaxContinuationBatches { get; set; } = 2;
     public List<AllowedToolConfig> AllowedTools { get; set; } = [];
     public List<TaskLibrarySeed> LibrarySeed { get; set; } = [];
 }
