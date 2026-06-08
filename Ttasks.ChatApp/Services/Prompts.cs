@@ -6,6 +6,15 @@ internal static class Prompts
 {
     private static readonly JsonSerializerOptions WriteIndented = new(JsonSerializerDefaults.Web) { WriteIndented = true };
 
+    public const string LibraryUsageGuidance =
+        """
+        Task library usage (read this every turn):
+        - The "Library suggestions" list below contains known-good parameterized process commands promoted from earlier successful turns. They are reusable building blocks.
+        - REUSE FIRST. Before authoring a new process task from scratch, scan the library suggestions. If one matches the request shape, use it via `libraryItemKey` (with optional `libraryParameters` to override values). The host renders the template into a concrete `process` command and runs it. Authoring fresh when a library item already fits is wasted work.
+        - PROMOTE LIBERALLY. When you author a new process task whose command shape would plausibly recur on a future turn — same fileName + similar args with parameterizable values like dates, IDs, names, top counts, filters — attach a `librarySuggestion` with a stable semantic key (e.g. `mail.received.countByDate`, `teams.chat.readById`, `git.diff.head`). The host promotes the suggestion to the library only after the whole graph succeeds, so failed attempts never pollute the store. Be biased toward suggesting; bad-but-failed candidates cost nothing, missed opportunities cost a future authoring round.
+        - A library item is one process command. If the pattern you want to capture spans multiple tasks (discover-then-read, fetch-then-transform), suggest the standalone reusable pieces individually; do not try to encode multi-task topology into a single template.
+        """;
+
     public const string UnstructuredToolGuidance =
         """
         Unstructured CLI tools (no `JSON:` fact-line in help):
@@ -219,6 +228,8 @@ internal static class Prompts
 
         {{HelpDrivenCraftingGuidance}}
 
+        {{LibraryUsageGuidance}}
+
         {{CompleteResultGuidance}}
 
         Allowed tools:
@@ -250,6 +261,8 @@ internal static class Prompts
         {{UnstructuredToolGuidance}}
 
         {{HelpDrivenCraftingGuidance}}
+
+        {{LibraryUsageGuidance}}
 
         {{CompleteResultGuidance}}
 
