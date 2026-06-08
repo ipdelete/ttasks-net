@@ -373,9 +373,19 @@ public sealed class ChatTurnService
     {
         executor.Register(TaskType.Process, context =>
         {
+            var upstreamOutputs = context.UpstreamTasks
+                .Where(task => task.Metadata.TryGetValue("planTaskId", out var raw) && raw is string)
+                .ToDictionary(
+                    task => (string)task.Metadata["planTaskId"]!,
+                    task => task.Result?.Output ?? string.Empty,
+                    StringComparer.Ordinal);
+
             var command = ProcessCommand.FromJson(context.Payload);
+            var resolvedArgs = OutputReferenceResolver.ResolveAll(command.Args, upstreamOutputs);
+            var resolved = new ProcessCommand(command.FileName, resolvedArgs);
+
             return TaskExecutor.WithBuiltInHandlers().Execute(CoreTask.Process(
-                command,
+                resolved,
                 context.Title,
                 context.Description,
                 context.Timeout,

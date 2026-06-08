@@ -6,6 +6,32 @@ internal static class Prompts
 {
     private static readonly JsonSerializerOptions WriteIndented = new(JsonSerializerDefaults.Web) { WriteIndented = true };
 
+    public const string DynamicBindingGuidance =
+        """
+        Dynamic parameter binding:
+        - A downstream process task's args may reference an upstream task's output using `${{ tasks.<taskId>.output[.path] }}`.
+          - `output` alone returns the upstream task's raw stdout.
+          - `output.field`, `output.field[0].subfield` navigates parsed JSON (`{}` and `[]` shapes documented in each tool's `--help` `JSON:` fact-line).
+          - If a field is JSON-as-string (for example, mail search's `rawResponse`), use `|fromjson|` to parse it: `output.rawResponse|fromjson|value[0].id`.
+        - Any task you reference with `${{tasks.<id>.output...}}` must also be declared as an edge dependency (`{"from":"<id>","to":"<thisTaskId>"}`). The host resolves the reference at runtime after the upstream task completes.
+        - Prefer one-shot graphs: discover the chat id and read messages in the same plan, with the read task referencing the discover task's JSON output.
+
+        Example: discover a Teams chat then read it in a single graph.
+        ```json
+        {
+          "tasks": [
+            { "id": "find",  "type": "process", "process": { "fileName": "teams", "args": ["chat-list", "--topic", "aet swe", "--json"] } },
+            { "id": "read",  "type": "process", "process": { "fileName": "teams", "args": ["read", "${{ tasks.find.output.chats[0].id }}", "-n", "20", "--json"] } },
+            { "id": "summary", "type": "prompt", "prompt": "summarize messages" }
+          ],
+          "edges": [
+            { "from": "find", "to": "read" },
+            { "from": "read", "to": "summary" }
+          ]
+        }
+        ```
+        """;
+
     public const string HelpDrivenCraftingGuidance =
         """
         Help-driven command crafting:
@@ -77,6 +103,8 @@ internal static class Prompts
         - A fully-qualified command like `az account list` exposes only that exact command.
 
         Never invent identifiers (chat IDs, channel IDs, mail folders, calendar IDs, paths, URLs) that the user did not provide.
+
+        {{DynamicBindingGuidance}}
 
         {{HelpDrivenCraftingGuidance}}
 
@@ -173,6 +201,8 @@ internal static class Prompts
         - For prompt tasks, set prompt text and do not include process/libraryItemKey/librarySuggestion.
         - Independent reads should fan out. Add one final prompt task that summarizes upstream outputs and depends on all reads.
         - Use stable semantic task ids.
+
+        {{DynamicBindingGuidance}}
 
         {{HelpDrivenCraftingGuidance}}
 

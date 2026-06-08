@@ -2,6 +2,7 @@
 
   <ItemGroup>
     <ProjectReference Include="..\Ttasks.Core\Ttasks.Core.csproj" />
+    <InternalsVisibleTo Include="Ttasks.Tests" />
   </ItemGroup>
 
   <PropertyGroup>

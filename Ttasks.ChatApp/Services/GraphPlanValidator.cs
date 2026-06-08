@@ -29,7 +29,7 @@ public sealed partial class GraphPlanValidator
             if (!ids.Add(task.Id) || !TaskIdPattern().IsMatch(task.Id))
                 throw new ArgumentException($"Invalid or duplicate task id '{task.Id}'.", nameof(plan));
 
-            ValidateTask(task, capabilities);
+            ValidateTask(task, capabilities, plan);
         }
 
         foreach (var edge in plan.Edges)
@@ -45,7 +45,7 @@ public sealed partial class GraphPlanValidator
             throw new ArgumentException("Plan must include a final prompt task.", nameof(plan));
     }
 
-    private void ValidateTask(GraphPlanTask task, CapabilitySet capabilities)
+    private void ValidateTask(GraphPlanTask task, CapabilitySet capabilities, GraphPlan plan)
     {
         if (string.Equals(task.Type, "prompt", StringComparison.OrdinalIgnoreCase))
         {
@@ -69,6 +69,8 @@ public sealed partial class GraphPlanValidator
             throw new ArgumentException(
                 $"Process task '{task.Id}' command '{Describe(task.Process)}' does not match any allowed tool prefix.");
 
+        ValidateReferencedTaskIds(task, plan);
+
         if (task.LibrarySuggestion is { } suggestion)
         {
             if (string.IsNullOrWhiteSpace(suggestion.Key))
@@ -80,6 +82,30 @@ public sealed partial class GraphPlanValidator
             if (!IsAllowed(probe, capabilities.AllowedTools))
                 throw new ArgumentException(
                     $"Process task '{task.Id}' library suggestion '{suggestion.Key}' does not match any allowed tool prefix.");
+        }
+    }
+
+    private static void ValidateReferencedTaskIds(GraphPlanTask task, GraphPlan plan)
+    {
+        if (task.Process is null)
+            return;
+        var declaredTaskIds = plan.Tasks.Select(t => t.Id).ToHashSet(StringComparer.Ordinal);
+        var dependencyIds = plan.Edges
+            .Where(edge => string.Equals(edge.To, task.Id, StringComparison.Ordinal))
+            .Select(edge => edge.From)
+            .ToHashSet(StringComparer.Ordinal);
+
+        foreach (var arg in task.Process.Args)
+        {
+            foreach (var referencedId in OutputReferenceResolver.ReferencedTaskIds(arg))
+            {
+                if (!declaredTaskIds.Contains(referencedId))
+                    throw new ArgumentException(
+                        $"Process task '{task.Id}' references unknown task '{referencedId}' via ${{{{ tasks.{referencedId}.output ... }}}}.");
+                if (!dependencyIds.Contains(referencedId))
+                    throw new ArgumentException(
+                        $"Process task '{task.Id}' references task '{referencedId}' but does not declare it as a dependency. Add an edge from '{referencedId}' to '{task.Id}'.");
+            }
         }
     }
 

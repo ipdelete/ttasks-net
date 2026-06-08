@@ -319,6 +319,135 @@ public sealed class ChatAppExperimentTests
         }
     }
 
+    [Fact]
+    public void OutputReferenceResolver_Resolves_Json_Path_From_Upstream_Output()
+    {
+        var upstream = new Dictionary<string, string>(StringComparer.Ordinal)
+        {
+            ["find"] = """{"chats":[{"id":"19:abc@thread.v2","topic":"AET SWE"},{"id":"19:def@thread.v2","topic":"Other"}]}"""
+        };
+
+        var resolved = OutputReferenceResolver.Resolve("${{ tasks.find.output.chats[0].id }}", upstream);
+
+        Assert.Equal("19:abc@thread.v2", resolved);
+    }
+
+    [Fact]
+    public void OutputReferenceResolver_Resolves_Raw_Output_When_No_Path()
+    {
+        var upstream = new Dictionary<string, string>(StringComparer.Ordinal)
+        {
+            ["echo"] = "hello world"
+        };
+
+        var resolved = OutputReferenceResolver.Resolve("${{ tasks.echo.output }}", upstream);
+
+        Assert.Equal("hello world", resolved);
+    }
+
+    [Fact]
+    public void OutputReferenceResolver_Supports_FromJson_For_String_Encoded_Json_Fields()
+    {
+        var upstream = new Dictionary<string, string>(StringComparer.Ordinal)
+        {
+            ["mail"] = """{"rawResponse":"{\"value\":[{\"id\":\"abc-123\"}]}"}"""
+        };
+
+        var resolved = OutputReferenceResolver.Resolve("${{ tasks.mail.output.rawResponse|fromjson|value[0].id }}", upstream);
+
+        Assert.Equal("abc-123", resolved);
+    }
+
+    [Fact]
+    public void Validator_Rejects_Reference_To_Task_Without_Edge()
+    {
+        var validator = CreateValidator("teams chat-list", "teams read");
+        var plan = new GraphPlan(
+            new GraphPlanInfo("plan"),
+            [
+                new GraphPlanTask("find", "process", Process: new ProcessSpec("teams", ["chat-list", "--topic", "aet swe"])),
+                new GraphPlanTask("read", "process", Process: new ProcessSpec("teams", ["read", "${{ tasks.find.output.chats[0].id }}"])),
+                new GraphPlanTask("summary", "prompt", Prompt: "summarize")
+            ],
+            [new GraphPlanEdge("read", "summary")]);
+
+        var ex = Assert.Throws<ArgumentException>(() => validator.Validate(plan, MakeCapabilities("teams chat-list", "teams read")));
+        Assert.Contains("does not declare it as a dependency", ex.Message);
+    }
+
+    [Fact]
+    public void Validator_Rejects_Reference_To_Unknown_Task()
+    {
+        var validator = CreateValidator("teams read");
+        var plan = new GraphPlan(
+            new GraphPlanInfo("plan"),
+            [
+                new GraphPlanTask("read", "process", Process: new ProcessSpec("teams", ["read", "${{ tasks.missing.output.chats[0].id }}"])),
+                new GraphPlanTask("summary", "prompt", Prompt: "summarize")
+            ],
+            [new GraphPlanEdge("read", "summary")]);
+
+        var ex = Assert.Throws<ArgumentException>(() => validator.Validate(plan, MakeCapabilities("teams read")));
+        Assert.Contains("unknown task 'missing'", ex.Message);
+    }
+
+    [Fact]
+    public void Chat_App_Dynamic_Binding_Resolves_Upstream_Output_Inside_One_Graph()
+    {
+        var toolDir = Path.Combine(Path.GetTempPath(), $"ttasks-fake-teams-bind-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(toolDir);
+        // teams chat-list emits JSON with a chat id; teams read echoes whatever id arg it received.
+        File.WriteAllText(Path.Combine(toolDir, "teams.cmd"),
+            "@echo off\r\n" +
+            "if \"%1\"==\"chat-list\" ( echo {\"chats\":[{\"id\":\"19:abc@thread.v2\",\"topic\":\"AET SWE\"}]} & exit /b 0 )\r\n" +
+            "if \"%1\"==\"read\" ( echo READ_CHAT=%2 & exit /b 0 )\r\n" +
+            "exit /b 1\r\n");
+        var originalPath = Environment.GetEnvironmentVariable("PATH");
+        var provider = new RecordingLlmProvider();
+        provider.QueueResult(LlmTurnResult.Text("""{"mode":"graph","answer":null,"planIntent":"discover then read"}"""));
+        provider.QueueResult(LlmTurnResult.Text("""
+            {
+              "graph": { "title": "Discover then read" },
+              "tasks": [
+                { "id": "find", "type": "process", "process": { "fileName": "teams", "args": ["chat-list", "--topic", "aet swe", "--json"] } },
+                { "id": "read", "type": "process", "process": { "fileName": "teams", "args": ["read", "${{ tasks.find.output.chats[0].id }}"] } },
+                { "id": "summary", "type": "prompt", "prompt": "report what was read" }
+              ],
+              "edges": [
+                { "from": "find", "to": "read" },
+                { "from": "read", "to": "summary" }
+              ]
+            }
+            """));
+        provider.QueueResult(LlmTurnResult.Text("done"));
+
+        try
+        {
+            Environment.SetEnvironmentVariable("PATH", toolDir + Path.PathSeparator + originalPath);
+            var store = new InMemoryStore();
+            var library = new StoreBackedTaskLibrary(store);
+            var options = Options.Create(new ChatAppOptions
+            {
+                MaxGraphRepairAttempts = 0,
+                MaxContinuationBatches = 0,
+                AllowedTools = [new AllowedToolConfig { Prefix = "teams chat-list" }, new AllowedToolConfig { Prefix = "teams read" }]
+            });
+            var service = CreateChatTurnService(provider, store, library, options);
+
+            var response = service.Handle("page-1", "read aet swe");
+
+            Assert.Equal("graph", response.Mode);
+            Assert.NotNull(response.Tasks);
+            var readTask = response.Tasks!.Single(task => task.Type == "process" && task.Output.Contains("READ_CHAT="));
+            Assert.Contains("READ_CHAT=19:abc@thread.v2", readTask.Output);
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("PATH", originalPath);
+            Directory.Delete(toolDir, recursive: true);
+        }
+    }
+
     private static GraphPlanValidator CreateValidator(params string[] prefixes) =>
         new(Options.Create(new ChatAppOptions
         {
