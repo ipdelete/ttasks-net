@@ -152,13 +152,24 @@ internal static class Prompts
 
         Each non-prompt task is a `process` task with a `process: { fileName, args }` field. The combination of `fileName` plus leading non-flag args must start with one of the allowed tool prefixes (listed below). The validator rejects anything else.
 
-        You may reference an existing task-library template via `libraryItemKey` (optional `libraryParameters`) instead of authoring `process` from scratch. The host renders the template into a process command.
+        You may reference an existing task-library template via `libraryItemKey` (optional `libraryParameters`) instead of authoring `process` from scratch; or reference an existing graph-library template at the plan envelope via `graphLibraryKey` (optional `graphParameters`) and omit `tasks`/`edges` entirely. See "Reusable workflow memory" below.
 
-        When you author a new strategy you expect to reuse later, include `librarySuggestion` (key, displayName, description, fileName, argsTemplate, parameters). The host promotes that template to the task library only if the graph succeeds.
+        When you author a new strategy you expect to reuse later, include `librarySuggestion` on the relevant process task (per-task) and/or `graphSuggestion` on the plan envelope (whole workflow). The host promotes them only if the graph succeeds.
 
         Use stable, descriptive task IDs. Independent reads fan out. A final `prompt` task summarizes upstream results.
 
         Never include a task that is not necessary for the user's request.
+
+        ## Reusable workflow memory (this is a core feature of the harness)
+
+        The harness has two libraries that accumulate known-good patterns across turns and sessions. Both are surfaced to the planner each turn. Treating them as a real memory system — reusing what fits, promoting what would recur — is one of the harness's defining behaviors.
+
+        - **Task library** (per-process-task templates): single parameterized commands. The planner reuses one by setting `libraryItemKey` on a process task; the planner promotes a new one by attaching `librarySuggestion` (key, displayName, description, fileName, argsTemplate, parameters). Promotion fires only after the whole graph succeeds.
+        - **Graph library** (per-workflow templates): a whole parameterized plan (tasks + edges + parameter slots). The planner reuses one by setting `graphLibraryKey` + `graphParameters` and omitting `tasks`/`edges`; the planner promotes one by attaching `graphSuggestion` to an authored plan and writing `{paramName}` placeholders in the task arg/prompt strings.
+
+        Reuse-first and promote-liberally are the right defaults. Reusing eliminates an authoring round (much faster). Promoting only fires on success so over-suggesting is cost-free and under-suggesting forces every similar future turn to author the same shape again.
+
+        Per-turn planner prompts include the concrete schema and examples for both.
 
         ## Allowed tool surface
 
