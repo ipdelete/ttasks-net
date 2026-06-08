@@ -89,6 +89,101 @@ public sealed class AdminService
             .Select(tool => new AdminAllowedTool(tool.Prefix.Trim(), tool.Description, tool.HelpCommand))
             .ToList();
 
+    public IReadOnlyList<AdminTurnSummary> RecentTurns(int limit = 50)
+    {
+        if (limit < 1)
+            throw new ArgumentOutOfRangeException(nameof(limit));
+
+        return EnumerateTurnTasks()
+            .GroupBy(task => (string)task.Metadata[ChatTurnService.TurnIdKey]!, StringComparer.Ordinal)
+            .Select(group => ToTurnSummary(group.Key, group.ToList()))
+            .OrderByDescending(turn => turn.CreatedAt)
+            .Take(limit)
+            .ToList();
+    }
+
+    public AdminTurnDetail GetTurn(string turnId)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(turnId);
+
+        var tasks = EnumerateTurnTasks()
+            .Where(task => string.Equals(task.Metadata[ChatTurnService.TurnIdKey] as string, turnId, StringComparison.Ordinal))
+            .OrderBy(task => task.CreatedAt)
+            .ToList();
+        if (tasks.Count == 0)
+            throw new KeyNotFoundException($"Turn '{turnId}' was not found.");
+
+        var sessionId = tasks
+            .Select(task => task.Metadata.TryGetValue(ChatTurnService.SessionIdKey, out var raw) ? raw as string : null)
+            .FirstOrDefault(value => !string.IsNullOrWhiteSpace(value));
+
+        return new AdminTurnDetail(
+            turnId,
+            sessionId,
+            tasks[0].CreatedAt,
+            RollupStatus(tasks),
+            tasks.Select(ToTurnTask).ToList());
+    }
+
+    private IEnumerable<CoreTask> EnumerateTurnTasks() =>
+        _store.Tasks.Keys
+            .Select(id => _store.Tasks.Get(id))
+            .Where(task => task.Metadata.ContainsKey(ChatTurnService.TurnIdKey));
+
+    private static AdminTurnSummary ToTurnSummary(string turnId, IReadOnlyList<CoreTask> tasks)
+    {
+        var ordered = tasks.OrderBy(task => task.CreatedAt).ToList();
+        var byKind = ordered
+            .GroupBy(task => task.Metadata.TryGetValue(ChatTurnService.TaskKindKey, out var raw) ? raw as string ?? "unknown" : "unknown", StringComparer.Ordinal)
+            .ToDictionary(group => group.Key, group => group.Count(), StringComparer.Ordinal);
+        var sessionId = ordered
+            .Select(task => task.Metadata.TryGetValue(ChatTurnService.SessionIdKey, out var raw) ? raw as string : null)
+            .FirstOrDefault(value => !string.IsNullOrWhiteSpace(value));
+
+        return new AdminTurnSummary(
+            turnId,
+            sessionId,
+            ordered[0].CreatedAt,
+            ordered.Count,
+            byKind.GetValueOrDefault("router", 0),
+            byKind.GetValueOrDefault("planner", 0),
+            byKind.GetValueOrDefault("repair", 0),
+            byKind.GetValueOrDefault("process", 0),
+            byKind.GetValueOrDefault("summary", 0),
+            ordered.Count(task => task.Status == CoreTaskStatus.Failed),
+            ordered.Count(task => task.Status == CoreTaskStatus.Blocked),
+            ordered.Count(task => task.Status == CoreTaskStatus.Cancelled),
+            ordered.Count(task => task.Status == CoreTaskStatus.Succeeded),
+            RollupStatus(ordered));
+    }
+
+    private static AdminTurnTask ToTurnTask(CoreTask task) =>
+        new(
+            task.Id,
+            task.Metadata.TryGetValue(ChatTurnService.TaskKindKey, out var kind) ? kind as string ?? "unknown" : "unknown",
+            task.TypeName,
+            task.Status.ToString(),
+            task.CreatedAt,
+            task.Title,
+            task.Error ?? task.Result?.Error,
+            task.BlockedBy,
+            task.Metadata.TryGetValue(ChatTurnService.AttemptKey, out var attempt) && attempt is IConvertible convertible
+                ? Convert.ToInt32(convertible, System.Globalization.CultureInfo.InvariantCulture)
+                : null);
+
+    private static string RollupStatus(IReadOnlyList<CoreTask> tasks)
+    {
+        if (tasks.Count == 0)
+            return "Empty";
+        if (tasks.Any(task => task.Status is CoreTaskStatus.Failed or CoreTaskStatus.Cancelled or CoreTaskStatus.Blocked))
+            return "Failed";
+        if (tasks.All(task => task.Status == CoreTaskStatus.Succeeded))
+            return "Succeeded";
+        if (tasks.Any(task => task.Status == CoreTaskStatus.Running))
+            return "Running";
+        return "Pending";
+    }
+
     private static AdminGraphSummary ToSummary(TaskGraph graph)
     {
         var tasks = graph.Members;

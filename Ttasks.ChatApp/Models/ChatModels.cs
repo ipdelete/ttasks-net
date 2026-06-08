@@ -69,6 +69,40 @@ public sealed record AdminTaskLibraryItem(
 
 public sealed record AdminAllowedTool(string Prefix, string? Description, string? HelpCommand);
 
+public sealed record AdminTurnSummary(
+    string TurnId,
+    string? SessionId,
+    DateTimeOffset CreatedAt,
+    int TaskCount,
+    int RouterCount,
+    int PlannerCount,
+    int RepairCount,
+    int ProcessCount,
+    int SummaryCount,
+    int Failed,
+    int Blocked,
+    int Cancelled,
+    int Succeeded,
+    string Status);
+
+public sealed record AdminTurnDetail(
+    string TurnId,
+    string? SessionId,
+    DateTimeOffset CreatedAt,
+    string Status,
+    IReadOnlyList<AdminTurnTask> Tasks);
+
+public sealed record AdminTurnTask(
+    string Id,
+    string Kind,
+    string Type,
+    string Status,
+    DateTimeOffset CreatedAt,
+    string Title,
+    string? Error,
+    string? BlockedBy,
+    int? Attempt);
+
 public sealed record AdminGraphSummary(
     string Id,
     string Title,

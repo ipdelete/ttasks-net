@@ -8,6 +8,11 @@ namespace Ttasks.ChatApp.Services;
 public sealed class ChatTurnService
 {
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
+    internal const string TurnIdKey = "turnId";
+    internal const string TaskKindKey = "kind";
+    internal const string AttemptKey = "attempt";
+    internal const string SessionIdKey = "sessionId";
+
     private readonly ILlmProvider _provider;
     private readonly GraphPlanValidator _validator;
     private readonly GraphPlanBuilder _builder;
@@ -43,9 +48,14 @@ public sealed class ChatTurnService
     public ChatResponse Handle(string? sessionId, string userMessage)
     {
         var (activeSessionId, llmSession) = _sessions.GetOrCreate(sessionId);
+        var turnId = Guid.NewGuid().ToString("N");
 
-        var executor = CreatePromptExecutor(llmSession, includeUpstreamResults: false);
-        var routeJson = executor.Execute(CoreTask.Prompt(Prompts.Router(userMessage))).Output;
+        var executor = CreatePromptExecutor(llmSession, includeUpstreamResults: false, _store);
+        var routerTask = CoreTask.Prompt(
+            Prompts.Router(userMessage),
+            title: "Route chat turn",
+            metadata: TurnMetadata(turnId, activeSessionId, "router"));
+        var routeJson = executor.Execute(routerTask).Output;
         var route = ParseJson<RouteDecision>(routeJson);
 
         if (string.Equals(route.Mode, "answer", StringComparison.OrdinalIgnoreCase))
@@ -58,13 +68,15 @@ public sealed class ChatTurnService
         if (capabilities.AllowedTools.Count == 0)
             return new ChatResponse("answer", capabilities.EmptyMessage, activeSessionId);
 
-        var attempt = RunGraphAttempts(executor, llmSession, userMessage, route.PlanIntent ?? userMessage, capabilities);
+        var attempt = RunGraphAttempts(executor, llmSession, activeSessionId, turnId, userMessage, route.PlanIntent ?? userMessage, capabilities);
         return new ChatResponse("graph", attempt.Answer, activeSessionId, attempt.GraphId, attempt.Tasks);
     }
 
     private GraphAttemptOutcome RunGraphAttempts(
         TaskExecutor planningExecutor,
         LlmAgentSession llmSession,
+        string sessionId,
+        string turnId,
         string userMessage,
         string planIntent,
         CapabilitySet capabilities)
@@ -77,10 +89,15 @@ public sealed class ChatTurnService
         {
             try
             {
-                var prompt = string.IsNullOrWhiteSpace(repairContext)
-                    ? Prompts.Planner(planIntent, capabilities, _options.DefaultTimeoutSeconds)
-                    : Prompts.Repair(userMessage, planIntent, capabilities, repairContext);
-                var planJson = planningExecutor.Execute(CoreTask.Prompt(prompt)).Output;
+                var isRepair = !string.IsNullOrWhiteSpace(repairContext);
+                var prompt = isRepair
+                    ? Prompts.Repair(userMessage, planIntent, capabilities, repairContext)
+                    : Prompts.Planner(planIntent, capabilities, _options.DefaultTimeoutSeconds);
+                var plannerTask = CoreTask.Prompt(
+                    prompt,
+                    title: isRepair ? $"Repair plan attempt {attemptNumber}" : "Plan graph",
+                    metadata: TurnMetadata(turnId, sessionId, isRepair ? "repair" : "planner", attemptNumber));
+                var planJson = planningExecutor.Execute(plannerTask).Output;
                 var plan = ParseJson<GraphPlan>(planJson);
                 ResolveLibraryReferences(plan, capabilities);
                 _validator.Validate(plan, capabilities);
@@ -88,6 +105,7 @@ public sealed class ChatTurnService
                 var graphExecutor = CreatePromptExecutor(llmSession, includeUpstreamResults: true, _store);
                 RegisterProcessHandler(graphExecutor);
                 var graph = _builder.Build(plan);
+                TagGraphTasks(graph, turnId, sessionId, attemptNumber);
                 graph.Run(graphExecutor, maxWorkers: _options.MaxWorkers);
 
                 lastAttempt = ToOutcome(graph);
@@ -118,6 +136,31 @@ public sealed class ChatTurnService
                     ? DescribeGraphFailure(lastAttempt.Tasks)
                     : lastAttempt.Answer
             };
+    }
+
+    private static void TagGraphTasks(TaskGraph graph, string turnId, string sessionId, int attemptNumber)
+    {
+        foreach (var task in graph.Members)
+        {
+            task.SetMetadata(TurnIdKey, turnId);
+            task.SetMetadata(SessionIdKey, sessionId);
+            task.SetMetadata(AttemptKey, attemptNumber);
+            if (!task.Metadata.ContainsKey(TaskKindKey))
+                task.SetMetadata(TaskKindKey, task.Type == TaskType.Prompt ? "summary" : "process");
+        }
+    }
+
+    private static IReadOnlyDictionary<string, object?> TurnMetadata(string turnId, string sessionId, string kind, int? attempt = null)
+    {
+        var values = new Dictionary<string, object?>(StringComparer.Ordinal)
+        {
+            [TurnIdKey] = turnId,
+            [SessionIdKey] = sessionId,
+            [TaskKindKey] = kind
+        };
+        if (attempt is not null)
+            values[AttemptKey] = attempt.Value;
+        return values;
     }
 
     private void ResolveLibraryReferences(GraphPlan plan, CapabilitySet capabilities)

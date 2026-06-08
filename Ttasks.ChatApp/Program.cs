@@ -112,6 +112,7 @@ app.MapPost("/api/chat", (ChatRequest request, ChatTurnService chat) =>
 app.MapGet("/admin", () => Results.Content(AdminPage(), "text/html"));
 app.MapGet("/admin/capabilities", () => Results.Content(CapabilitiesPage(), "text/html"));
 app.MapGet("/admin/library", () => Results.Content(TaskLibraryPage(), "text/html"));
+app.MapGet("/admin/turns", () => Results.Content(TurnsPage(), "text/html"));
 
 app.MapGet("/api/admin/graphs", (AdminService admin, int? limit) =>
 {
@@ -122,6 +123,24 @@ app.MapGet("/api/admin/graphs", (AdminService admin, int? limit) =>
 app.MapGet("/api/admin/library", (AdminService admin) => Results.Ok(admin.TaskLibrary()));
 
 app.MapGet("/api/admin/capabilities", (AdminService admin) => Results.Ok(admin.AllowedTools()));
+
+app.MapGet("/api/admin/turns", (AdminService admin, int? limit) =>
+{
+    var cappedLimit = Math.Clamp(limit ?? 50, 1, 200);
+    return Results.Ok(admin.RecentTurns(cappedLimit));
+});
+
+app.MapGet("/api/admin/turns/{id}", (string id, AdminService admin) =>
+{
+    try
+    {
+        return Results.Ok(admin.GetTurn(id));
+    }
+    catch (KeyNotFoundException)
+    {
+        return Results.NotFound(new { error = $"Turn '{id}' was not found." });
+    }
+});
 
 app.MapGet("/api/admin/graphs/{id}", (string id, AdminService admin) =>
 {
@@ -210,6 +229,7 @@ static string AdminPage() =>
           <div class="muted">Persisted graph and task runs</div>
           <nav>
             <strong>Graphs and tasks</strong>
+            <a href="/admin/turns">Turns</a>
             <a href="/admin/capabilities">Capabilities</a>
             <a href="/admin/library">Task library</a>
           </nav>
@@ -390,6 +410,7 @@ static string CapabilitiesPage() =>
           <div class="muted">Host-approved actions the chat planner can use</div>
           <nav>
             <a href="/admin">Graphs and tasks</a>
+            <a href="/admin/turns">Turns</a>
             <strong>Capabilities</strong>
             <a href="/admin/library">Task library</a>
           </nav>
@@ -475,6 +496,7 @@ static string TaskLibraryPage() =>
           <div class="muted">Saved reusable capability task templates</div>
           <nav>
             <a href="/admin">Graphs and tasks</a>
+            <a href="/admin/turns">Turns</a>
             <a href="/admin/capabilities">Capabilities</a>
             <strong>Task library</strong>
           </nav>
@@ -555,6 +577,196 @@ static string TaskLibraryPage() =>
         }
 
         loadLibrary();
+      </script>
+    </body>
+    </html>
+    """;
+
+static string TurnsPage() =>
+    """
+    <!doctype html>
+    <html lang="en">
+    <head>
+      <meta charset="utf-8" />
+      <meta name="viewport" content="width=device-width, initial-scale=1" />
+      <title>ttasks turns</title>
+      <style>
+        :root { color-scheme: light dark; --border: #d0d7de; --muted: #57606a; --bg: #f6f8fa; --code-bg: #f6f8fa; --code-fg: #24292f; }
+        @media (prefers-color-scheme: dark) {
+          :root { --border: #8b949e; --muted: #8b949e; --bg: #161b22; --code-bg: #161b22; --code-fg: #e6edf3; }
+        }
+        body { font-family: system-ui, sans-serif; margin: 0; }
+        header { border-bottom: 1px solid var(--border); padding: 1rem; display: flex; justify-content: space-between; align-items: center; }
+        nav { display: flex; gap: .75rem; margin-top: .5rem; }
+        nav a { color: inherit; }
+        main { display: grid; grid-template-columns: 360px minmax(360px, 1fr) 420px; min-height: calc(100vh - 65px); }
+        section { border-right: 1px solid var(--border); padding: 1rem; overflow: auto; }
+        section:last-child { border-right: 0; }
+        h1, h2, h3 { margin: 0 0 .75rem; }
+        button { border: 1px solid var(--border); border-radius: .4rem; background: canvas; padding: .4rem .6rem; cursor: pointer; }
+        .list { display: grid; gap: .5rem; }
+        .card { border: 1px solid var(--border); border-radius: .5rem; padding: .7rem; background: canvas; cursor: pointer; }
+        .card:hover, .card.selected { outline: 2px solid #0969da; }
+        .muted { color: var(--muted); font-size: .85rem; }
+        .row { display: flex; gap: .5rem; align-items: center; justify-content: space-between; }
+        .badge { border-radius: 999px; padding: .15rem .45rem; font-size: .75rem; font-weight: 700; }
+        .kind-badge { border-radius: .25rem; padding: .1rem .35rem; font-size: .7rem; font-weight: 600; background: var(--bg); color: var(--muted); text-transform: uppercase; }
+        .Succeeded { background: #dafbe1; color: #116329; }
+        .Failed, .Cancelled, .Blocked { background: #ffebe9; color: #82071e; }
+        .Running { background: #fff8c5; color: #7d4e00; }
+        .Pending, .Empty { background: var(--bg); color: var(--muted); }
+        .node { border: 1px solid var(--border); border-left-width: .45rem; border-radius: .5rem; padding: .65rem; cursor: pointer; margin-bottom: .5rem; }
+        .node.Succeeded { border-left-color: #2da44e; }
+        .node.Failed, .node.Cancelled, .node.Blocked { border-left-color: #cf222e; }
+        .node.Running, .node.Pending { border-left-color: #bf8700; }
+        pre { white-space: pre-wrap; overflow-wrap: anywhere; background: var(--code-bg); color: var(--code-fg); padding: .75rem; border-radius: .5rem; max-height: 45vh; overflow: auto; }
+        dl { display: grid; grid-template-columns: 7rem 1fr; gap: .35rem .75rem; }
+        dt { color: var(--muted); }
+        dd { margin: 0; overflow-wrap: anywhere; }
+      </style>
+    </head>
+    <body>
+      <header>
+        <div>
+          <h1>ttasks turns</h1>
+          <div class="muted">Per-turn reasoning + execution trail</div>
+          <nav>
+            <a href="/admin">Graphs and tasks</a>
+            <strong>Turns</strong>
+            <a href="/admin/capabilities">Capabilities</a>
+            <a href="/admin/library">Task library</a>
+          </nav>
+        </div>
+        <button id="refresh">Refresh</button>
+      </header>
+      <main>
+        <section>
+          <h2>Recent turns</h2>
+          <div id="turns" class="list">Loading...</div>
+        </section>
+        <section>
+          <h2 id="turn-title">Turn detail</h2>
+          <div id="turn-meta" class="muted"></div>
+          <div id="turn-tasks"></div>
+        </section>
+        <section>
+          <h2>Task inspector</h2>
+          <div id="task">Select a task.</div>
+        </section>
+      </main>
+      <script>
+        const turnsEl = document.getElementById('turns');
+        const turnTasksEl = document.getElementById('turn-tasks');
+        const turnTitleEl = document.getElementById('turn-title');
+        const turnMetaEl = document.getElementById('turn-meta');
+        const taskEl = document.getElementById('task');
+        let selectedTurnId = null;
+        let selectedTaskId = null;
+
+        document.getElementById('refresh').addEventListener('click', loadTurns);
+
+        function badge(status) {
+          return `<span class="badge ${status}">${status}</span>`;
+        }
+
+        function fmtTime(value) {
+          return new Date(value).toLocaleString();
+        }
+
+        async function loadTurns() {
+          turnsEl.textContent = 'Loading...';
+          const turns = await fetch('/api/admin/turns?limit=100').then(r => r.json());
+          turnsEl.innerHTML = '';
+          if (turns.length === 0) {
+            turnsEl.textContent = 'No turns persisted yet. Send a chat message to create one.';
+            return;
+          }
+          for (const turn of turns) {
+            const card = document.createElement('div');
+            card.className = `card ${turn.turnId === selectedTurnId ? 'selected' : ''}`;
+            const counts = [];
+            if (turn.routerCount) counts.push(`${turn.routerCount} router`);
+            if (turn.plannerCount) counts.push(`${turn.plannerCount} planner`);
+            if (turn.repairCount) counts.push(`${turn.repairCount} repair`);
+            if (turn.processCount) counts.push(`${turn.processCount} process`);
+            if (turn.summaryCount) counts.push(`${turn.summaryCount} summary`);
+            card.innerHTML = `
+              <div class="row"><strong>${escapeHtml(turn.turnId.slice(0, 8))}</strong>${badge(turn.status)}</div>
+              <div class="muted">${fmtTime(turn.createdAt)}</div>
+              <div class="muted">${turn.taskCount} tasks: ${counts.join(', ') || 'none'}</div>
+              <div class="muted">session ${escapeHtml((turn.sessionId || '').slice(0, 16))}</div>`;
+            card.addEventListener('click', () => loadTurn(turn.turnId));
+            turnsEl.appendChild(card);
+          }
+          if (!selectedTurnId) {
+            await loadTurn(turns[0].turnId);
+          }
+        }
+
+        async function loadTurn(turnId) {
+          selectedTurnId = turnId;
+          selectedTaskId = null;
+          const turn = await fetch(`/api/admin/turns/${encodeURIComponent(turnId)}`).then(r => r.json());
+          turnTitleEl.textContent = `Turn ${turn.turnId.slice(0, 8)}`;
+          turnMetaEl.textContent = `${turn.turnId} - session ${turn.sessionId || ''} - ${fmtTime(turn.createdAt)} - ${turn.status}`;
+          renderTurn(turn);
+          taskEl.textContent = 'Select a task.';
+          highlightTurns();
+        }
+
+        function highlightTurns() {
+          for (const card of turnsEl.children) {
+            const id = card.querySelector('strong')?.textContent;
+            card.classList.toggle('selected', selectedTurnId?.startsWith(id || ''));
+          }
+        }
+
+        function renderTurn(turn) {
+          turnTasksEl.innerHTML = '';
+          for (const task of turn.tasks) {
+            const node = document.createElement('div');
+            node.className = `node ${task.status}`;
+            const attempt = task.attempt ? ` (attempt ${task.attempt})` : '';
+            node.innerHTML = `
+              <div class="row">
+                <strong><span class="kind-badge">${escapeHtml(task.kind)}</span> ${escapeHtml(task.title || task.id.slice(0, 8))}${attempt}</strong>
+                ${badge(task.status)}
+              </div>
+              <div class="muted">${escapeHtml(task.type)} - ${escapeHtml(task.id)} - ${fmtTime(task.createdAt)}</div>
+              ${task.error ? `<div class="muted">error: ${escapeHtml(task.error)}</div>` : ''}`;
+            node.addEventListener('click', () => loadTask(task.id));
+            turnTasksEl.appendChild(node);
+          }
+        }
+
+        async function loadTask(id) {
+          selectedTaskId = id;
+          const task = await fetch(`/api/admin/tasks/${encodeURIComponent(id)}`).then(r => r.json());
+          taskEl.innerHTML = `
+            <h3>${escapeHtml(task.title || task.id)}</h3>
+            <dl>
+              <dt>id</dt><dd>${escapeHtml(task.id)}</dd>
+              <dt>type</dt><dd>${escapeHtml(task.type)}</dd>
+              <dt>status</dt><dd>${badge(task.status)}</dd>
+              <dt>created</dt><dd>${fmtTime(task.createdAt)}</dd>
+              <dt>timeout</dt><dd>${task.timeout ?? ''}</dd>
+              <dt>error</dt><dd>${escapeHtml(task.error || task.result?.error || '')}</dd>
+            </dl>
+            <h3>Metadata</h3>
+            <pre>${escapeHtml(JSON.stringify(task.metadata || {}, null, 2))}</pre>
+            <h3>Payload</h3>
+            <pre>${escapeHtml(task.payload)}</pre>
+            <h3>Output</h3>
+            <pre>${escapeHtml(task.result?.output || '')}</pre>`;
+        }
+
+        function escapeHtml(value) {
+          return String(value ?? '').replace(/[&<>"']/g, ch => ({
+            '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+          }[ch]));
+        }
+
+        loadTurns();
       </script>
     </body>
     </html>

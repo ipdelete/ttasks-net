@@ -215,6 +215,22 @@ public sealed class ChatAppExperimentTests
             var good = Assert.Single(items, item => item.Key == "mail.good");
             Assert.Equal("mail", good.FileName);
             Assert.DoesNotContain(items, item => item.Key == "mail.bad");
+
+            var admin = new AdminService(store, library, options);
+            var turns = admin.RecentTurns();
+            var turnSummary = Assert.Single(turns);
+            Assert.Equal("page-1", turnSummary.SessionId);
+            Assert.Equal(1, turnSummary.RouterCount);
+            Assert.Equal(1, turnSummary.PlannerCount);
+            Assert.Equal(1, turnSummary.RepairCount);
+            Assert.Equal(2, turnSummary.ProcessCount);
+            Assert.Equal(2, turnSummary.SummaryCount);
+
+            var turn = admin.GetTurn(turnSummary.TurnId);
+            Assert.Equal(new[] { "router", "planner", "process", "summary", "repair", "process", "summary" },
+                turn.Tasks.Select(task => task.Kind));
+            Assert.All(turn.Tasks.Where(task => task.Kind != "router"), task => Assert.NotNull(task.Attempt));
+            Assert.Null(turn.Tasks.Single(task => task.Kind == "router").Attempt);
         }
         finally
         {
