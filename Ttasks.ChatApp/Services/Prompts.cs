@@ -10,10 +10,51 @@ internal static class Prompts
         """
         Graph library usage:
         - The "Graph library suggestions" list below contains known-good multi-task workflow templates with parameter slots. Each is a whole plan (tasks + edges) that recurs for many user requests.
-        - REUSE FIRST. If a graph template matches the user's intent, set `graphLibraryKey` to its key and `graphParameters` to the parameter values for this turn, and OMIT `tasks`/`edges` from your reply. The host will render the template and execute the resulting plan. Reusing a graph template is much higher leverage than reusing single-task templates.
-        - PROMOTE WHEN A WORKFLOW SHAPE RECURS. When you author a fresh plan whose topology + command shape would plausibly apply to many user requests with different inputs, attach `graphSuggestion: { key, displayName, description, parameters }`. Use `{paramName}` placeholders inside your `process.args[*]`, `prompt`, and `title` values to mark where parameters substitute. Promotion fires only after the whole graph succeeds; failed attempts never pollute the library.
-        - A graph suggestion key should be stable and semantic (e.g. `teams.chat.read-by-topic.summary`, `mail.received.countByDate.summary`).
-        - Do not set both `graphLibraryKey` (reuse) and `tasks`/`edges` (author fresh) in the same plan. Pick one.
+
+        REUSE FIRST. If a graph template matches the user's intent, set `graphLibraryKey` to its key and `graphParameters` to the parameter values for this turn, and OMIT `tasks`/`edges` from your reply. Reusing a graph template is much higher leverage than reusing single-task templates because it eliminates an entire authoring round.
+
+        ALWAYS PROPOSE A graphSuggestion WHEN THE PLAN MATCHES THIS PATTERN:
+        - Two or more process tasks (especially a discover-then-read pattern, a fan-out parallel-reads pattern, or a fetch-then-transform pattern), AND
+        - At least one process task arg contains a user-supplied value that would be different on a future similar request (a chat topic, a date, a search term, a path, an ID, a name, a count).
+
+        When you propose a graphSuggestion:
+        - Replace those user-supplied values in your `process.args[*]`, `prompt`, and `title` strings with `{paramName}` placeholders.
+        - Put `graphParameters: { "paramName": "actual value for this turn" }` at the plan envelope so this turn's run still executes with concrete values.
+        - Attach `graphSuggestion: { key, displayName, description, parameters: [...] }` describing the template.
+        - Promotion only fires after the whole graph succeeds, so over-suggesting is safe and costs nothing.
+
+        WORKED EXAMPLE:
+        User: "summarize the latest from the aet swe chat"
+        Authored plan (note `{topic}` and `{messages}` placeholders, `graphParameters` for this turn, and `graphSuggestion` for promotion):
+        ```json
+        {
+          "graph": { "title": "Discover, read, and summarize a Teams chat" },
+          "tasks": [
+            { "id": "find", "type": "process", "process": { "fileName": "teams", "args": ["chat-list", "--topic", "{topic}", "--json"] } },
+            { "id": "read", "type": "process", "process": { "fileName": "teams", "args": ["read", "${{ tasks.find.output.chats[0].id }}", "-n", "{messages}", "--json"] } },
+            { "id": "summary", "type": "prompt", "prompt": "Summarize the latest messages from the {topic} chat." }
+          ],
+          "edges": [
+            { "from": "find", "to": "read" },
+            { "from": "read", "to": "summary" }
+          ],
+          "graphParameters": { "topic": "aet swe", "messages": 30 },
+          "graphSuggestion": {
+            "key": "teams.chat.read-by-topic.summary",
+            "displayName": "Discover a Teams chat by topic, read latest messages, summarize",
+            "description": "Two-step workflow that resolves a Teams chat by topic substring, reads the latest N messages, and produces a concise summary.",
+            "parameters": [
+              { "name": "topic",    "source": "user" },
+              { "name": "messages", "source": "default", "defaultValue": 30 }
+            ]
+          }
+        }
+        ```
+        The host renders the template with `graphParameters` for this turn, executes it, and on success promotes the template (with placeholders intact) to the graph library. Next turn, a similar request can set `graphLibraryKey` + `graphParameters` and skip authoring.
+
+        Choose stable semantic keys (e.g. `teams.chat.read-by-topic.summary`, `mail.received.countByDate.summary`, `repo.recent-commits.summary`).
+
+        Do not set both `graphLibraryKey` (reuse) and `tasks`/`edges` (author fresh) in the same plan. Pick one.
         """;
 
     public const string LibraryUsageGuidance =
