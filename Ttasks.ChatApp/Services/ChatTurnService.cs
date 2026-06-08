@@ -8,16 +8,6 @@ namespace Ttasks.ChatApp.Services;
 public sealed class ChatTurnService
 {
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
-    private const string CompleteResultGuidance =
-        """
-        Complete-result strategy:
-        - If the user asks for all results, a total count, or a complete summary, do not infer completeness from one bounded page.
-        - Use the tool documentation to find count, --all, paging, cursor, continuation-token, offset, skip, or next-page support.
-        - Fetch only the fields needed for discovery/counting first, such as stable ids or keys.
-        - Page until the tool returns an empty page, a final short page, or another documented end condition.
-        - De-duplicate across pages by stable id/key before counting.
-        - Report an exact total only when the graph has proven complete coverage; otherwise say the result is bounded or incomplete.
-        """;
     private readonly ILlmProvider _provider;
     private readonly GraphPlanValidator _validator;
     private readonly GraphPlanBuilder _builder;
@@ -55,7 +45,7 @@ public sealed class ChatTurnService
         var (activeSessionId, llmSession) = _sessions.GetOrCreate(sessionId);
 
         var executor = CreatePromptExecutor(llmSession, includeUpstreamResults: false);
-        var routeJson = executor.Execute(CoreTask.Prompt(CreateRouterPrompt(userMessage))).Output;
+        var routeJson = executor.Execute(CoreTask.Prompt(Prompts.Router(userMessage))).Output;
         var route = ParseJson<RouteDecision>(routeJson);
 
         if (string.Equals(route.Mode, "answer", StringComparison.OrdinalIgnoreCase))
@@ -88,8 +78,8 @@ public sealed class ChatTurnService
             try
             {
                 var prompt = string.IsNullOrWhiteSpace(repairContext)
-                    ? CreatePlannerPrompt(planIntent, capabilities)
-                    : CreateRepairPlannerPrompt(userMessage, planIntent, capabilities, repairContext);
+                    ? Prompts.Planner(planIntent, capabilities, _options.DefaultTimeoutSeconds)
+                    : Prompts.Repair(userMessage, planIntent, capabilities, repairContext);
                 var planJson = planningExecutor.Execute(CoreTask.Prompt(prompt)).Output;
                 var plan = ParseJson<GraphPlan>(planJson);
                 ResolveLibraryReferences(plan, capabilities);
@@ -194,108 +184,6 @@ public sealed class ChatTurnService
                 context.Task.Metadata)).Raw;
         });
     }
-
-    private string CreateRouterPrompt(string userMessage) =>
-        $$"""
-        You are the router for a ttasks-net chat experiment.
-
-        Return JSON only. Do not wrap it in Markdown.
-
-        If the user can be answered directly without reading external systems, running tool commands, or doing external actions, return:
-        {
-          "mode": "answer",
-          "answer": "your concise answer",
-          "planIntent": null
-        }
-
-        If the user is asking to use external tools, fan out work, run commands, or summarize external outputs, return:
-        {
-          "mode": "graph",
-          "answer": null,
-          "planIntent": "short actionable intent"
-        }
-
-        User message:
-        {{userMessage}}
-        """;
-
-    private string CreatePlannerPrompt(string planIntent, CapabilitySet capabilities) =>
-        $$"""
-        Create a ttasks-net graph plan for this intent:
-        {{planIntent}}
-
-        Return JSON only. Do not wrap it in Markdown.
-
-        Schema:
-        {
-          "graph": { "title": "short title", "metadata": { "source": "chat-ui" } },
-          "tasks": [
-            {
-              "id": "stable-id",
-              "type": "process|prompt",
-              "process": { "fileName": "tool", "args": ["arg1", "arg2"] },
-              "prompt": "prompt text for prompt tasks only",
-              "libraryItemKey": "optional key of a library template to render and use as process",
-              "libraryParameters": { "optionalToken": "value" },
-              "librarySuggestion": {
-                "key": "stable.semantic.key",
-                "displayName": "short name",
-                "description": "what this does",
-                "fileName": "tool",
-                "argsTemplate": ["arg1", "arg2 with {token}"],
-                "parameters": [ { "name": "token", "source": "clock.now|clock.yesterday|clock.tomorrow|default", "format": "yyyy-MM-dd", "defaultValue": null } ]
-              },
-              "title": "optional",
-              "description": "optional",
-              "timeout": {{_options.DefaultTimeoutSeconds}},
-              "metadata": { "kind": "read" }
-            }
-          ],
-          "edges": [ { "from": "dep-id", "to": "consumer-id" } ]
-        }
-
-        Rules:
-        - Use only the allowed tools listed below. Each "process" task's fileName plus leading non-flag args must start with one of the allowed prefixes (e.g. "mail", "teams read", "az account list").
-        - Prefer reusing a libraryItemKey from the library suggestions when one matches the request. The host will render that template and run it. Use libraryParameters to override values.
-        - When authoring a new strategy you expect to reuse later, include librarySuggestion so the host can promote it to the library after the graph succeeds. The fileName must match process.fileName and the args template head must also satisfy the allowed prefixes.
-        - For prompt tasks, set prompt text and do not include process/libraryItemKey/librarySuggestion.
-        - Independent reads should fan out. Add one final prompt task that summarizes upstream outputs and depends on all reads.
-        - Use stable semantic task ids.
-
-        {{CompleteResultGuidance}}
-
-        Allowed tools:
-        {{FormatAllowedTools(capabilities.AllowedTools)}}
-
-        Library suggestions for this turn:
-        {{FormatLibrarySuggestions(capabilities.LibrarySuggestions)}}
-        """;
-
-    private string CreateRepairPlannerPrompt(string userMessage, string planIntent, CapabilitySet capabilities, string repairContext) =>
-        $$"""
-        Revise the ttasks-net graph plan after a failed attempt.
-
-        Original user request:
-        {{userMessage}}
-
-        Intent:
-        {{planIntent}}
-
-        Failure observations:
-        {{repairContext}}
-
-        Return JSON only. Do not wrap it in Markdown.
-
-        Use the same schema and rules as the normal planner. Prefer changing only what is needed to recover from the failure. Do not repeat a failed command shape without changing it.
-
-        {{CompleteResultGuidance}}
-
-        Allowed tools:
-        {{FormatAllowedTools(capabilities.AllowedTools)}}
-
-        Library suggestions for this turn:
-        {{FormatLibrarySuggestions(capabilities.LibrarySuggestions)}}
-        """;
 
     private void PromoteLibrarySuggestions(GraphPlan plan, TaskGraph graph)
     {
@@ -408,30 +296,6 @@ public sealed class ChatTurnService
         });
         return "The graph did not produce a final answer because one or more tasks failed:\n" + string.Join("\n", lines);
     }
-
-    private static string FormatAllowedTools(IReadOnlyList<AllowedTool> tools) =>
-        JsonSerializer.Serialize(
-            tools.Select(tool => new { prefix = tool.Prefix, description = tool.Description, helpCommand = tool.HelpCommand }),
-            new JsonSerializerOptions(JsonSerializerDefaults.Web) { WriteIndented = true });
-
-    private static string FormatLibrarySuggestions(IReadOnlyList<TaskLibraryItem> items) =>
-        JsonSerializer.Serialize(
-            items.Select(item => new
-            {
-                key = item.Key,
-                displayName = item.DisplayName,
-                description = item.Description,
-                fileName = item.FileName,
-                argsTemplate = item.ArgsTemplate,
-                parameters = item.Parameters.Select(p => new
-                {
-                    name = p.Name,
-                    source = p.Source,
-                    format = p.Format,
-                    defaultValue = p.DefaultValue
-                })
-            }),
-            new JsonSerializerOptions(JsonSerializerDefaults.Web) { WriteIndented = true });
 
     private sealed record GraphAttemptOutcome(
         string Answer,

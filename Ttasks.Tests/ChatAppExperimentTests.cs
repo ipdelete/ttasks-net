@@ -201,7 +201,6 @@ public sealed class ChatAppExperimentTests
             var library = new StoreBackedTaskLibrary(store);
             var options = Options.Create(new ChatAppOptions
             {
-                SystemMessagePath = WriteTempSystemMessage("system"),
                 MaxGraphRepairAttempts = 1,
                 AllowedTools = [new AllowedToolConfig { Prefix = "mail" }]
             });
@@ -257,7 +256,6 @@ public sealed class ChatAppExperimentTests
         library ??= new StoreBackedTaskLibrary(store);
         options ??= Options.Create(new ChatAppOptions
         {
-            SystemMessagePath = WriteTempSystemMessage("system"),
             AllowedTools = []
         });
         return new ChatTurnService(
@@ -270,13 +268,6 @@ public sealed class ChatAppExperimentTests
             library,
             new TaskLibraryTemplateRenderer(),
             options);
-    }
-
-    private static string WriteTempSystemMessage(string content)
-    {
-        var path = Path.Combine(Path.GetTempPath(), $"ttasks-chat-system-{Guid.NewGuid():N}.md");
-        File.WriteAllText(path, content);
-        return path;
     }
 
     private sealed class ManualTimeProvider : TimeProvider

@@ -22,43 +22,24 @@ public sealed class ChatSessionRegistry : IDisposable
         var id = string.IsNullOrWhiteSpace(sessionId) ? Guid.NewGuid().ToString("N") : sessionId;
         return (id, _sessions.GetOrAdd(id, _ =>
         {
+            var allowedTools = _options.AllowedTools
+                .Where(tool => !string.IsNullOrWhiteSpace(tool.Prefix))
+                .Select(tool => new AllowedTool(tool.Prefix.Trim(), tool.Description, tool.HelpCommand))
+                .ToList();
+
             var session = new LlmAgentSession(_provider, new LlmSessionOptions
             {
                 Model = _options.Model,
                 SystemMessage = new SystemMessageConfig
                 {
                     Mode = SystemMessageMode.Replace,
-                    Content = ReadSystemMessage()
+                    Content = Prompts.SystemMessage(allowedTools)
                 },
                 SkipCustomInstructions = true
             });
             session.Enter();
             return session;
         }));
-    }
-
-    private string ReadSystemMessage()
-    {
-        var configuredPath = _options.SystemMessagePath;
-        if (string.IsNullOrWhiteSpace(configuredPath))
-            throw new InvalidOperationException("ChatApp:SystemMessagePath must be configured.");
-
-        var candidates = Path.IsPathRooted(configuredPath)
-            ? new[] { configuredPath }
-            : new[]
-            {
-                Path.GetFullPath(configuredPath, Directory.GetCurrentDirectory()),
-                Path.GetFullPath(configuredPath, AppContext.BaseDirectory)
-            };
-        var path = candidates.FirstOrDefault(File.Exists);
-        if (path is null)
-            throw new FileNotFoundException($"Chat app system message file was not found. Configure ChatApp:SystemMessagePath or create '{configuredPath}'.", configuredPath);
-
-        var content = File.ReadAllText(path);
-        if (string.IsNullOrWhiteSpace(content))
-            throw new InvalidOperationException($"Chat app system message file '{path}' must not be empty.");
-
-        return content;
     }
 
     public void Dispose()

@@ -26,7 +26,7 @@
 The app includes:
 
 - browser chat page
-- replacement system prompt from `Ttasks.ChatApp\system-message.md`
+- system prompt computed at session creation from the configured allowed tools (`Prompts.SystemMessage`)
 - per-page shared LLM sessions through `ChatSessionRegistry`
 - router prompt for direct answer vs graph action
 - graph planner prompt that emits validated graph JSON
@@ -55,7 +55,7 @@ Important files:
 | File | Purpose |
 | --- | --- |
 | `Ttasks.ChatApp\Program.cs` | DI registration, HTTP endpoints, inline chat/admin pages. |
-| `Ttasks.ChatApp\system-message.md` | Replacement system prompt for chat sessions. |
+| `Ttasks.ChatApp\Services\Prompts.cs` | All LLM prompts: system message, router, planner, repair, complete-result guidance. |
 | `Ttasks.ChatApp\Services\ChatTurnService.cs` | Main router, capability, tool-authoring, planner, validation, execution flow. |
 | `Ttasks.ChatApp\Services\Capabilities.cs` | Capability providers, policy models, task library, template rendering, Teams metadata resolution. |
 | `Ttasks.ChatApp\Services\GraphPlanValidator.cs` | Plan and capability payload safety boundary. |
