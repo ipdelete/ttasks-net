@@ -408,6 +408,71 @@ public sealed class ChatAppExperimentTests
     }
 
     [Fact]
+    public void Chat_App_Dynamic_Binding_Resolves_Prompt_Output_Into_Downstream_Process_Task()
+    {
+        var toolDir = Path.Combine(Path.GetTempPath(), $"ttasks-fake-echo-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(toolDir);
+        // produce.cmd emits a raw text line; echo.cmd echoes whatever it gets as arg 1.
+        File.WriteAllText(Path.Combine(toolDir, "produce.cmd"),
+            "@echo off\r\necho line:initial-value\r\nexit /b 0\r\n");
+        File.WriteAllText(Path.Combine(toolDir, "echo.cmd"),
+            "@echo off\r\necho ECHOED=%1\r\nexit /b 0\r\n");
+        var originalPath = Environment.GetEnvironmentVariable("PATH");
+        var provider = new RecordingLlmProvider();
+        provider.QueueResult(LlmTurnResult.Text("""{"mode":"graph","answer":null,"planIntent":"produce then echo"}"""));
+        provider.QueueResult(LlmTurnResult.Text("""
+            {
+              "graph": { "title": "Produce then echo" },
+              "tasks": [
+                { "id": "produce", "type": "process", "process": { "fileName": "produce", "args": [] } },
+                { "id": "extract", "type": "prompt", "prompt": "extract the value" },
+                { "id": "echo", "type": "process", "process": { "fileName": "echo", "args": ["${{ tasks.extract.output }}"] } },
+                { "id": "summary", "type": "prompt", "prompt": "report" }
+              ],
+              "edges": [
+                { "from": "produce", "to": "extract" },
+                { "from": "extract", "to": "echo" },
+                { "from": "echo", "to": "summary" }
+              ]
+            }
+            """));
+        // extract prompt returns just the value after "line:"
+        provider.QueueResult(LlmTurnResult.Text("initial-value"));
+        // summary
+        provider.QueueResult(LlmTurnResult.Text("done"));
+
+        try
+        {
+            Environment.SetEnvironmentVariable("PATH", toolDir + Path.PathSeparator + originalPath);
+            var store = new InMemoryStore();
+            var library = new StoreBackedTaskLibrary(store);
+            var options = Options.Create(new ChatAppOptions
+            {
+                MaxGraphRepairAttempts = 0,
+                MaxContinuationBatches = 0,
+                AllowedTools =
+                [
+                    new AllowedToolConfig { Prefix = "produce" },
+                    new AllowedToolConfig { Prefix = "echo" }
+                ]
+            });
+            var service = CreateChatTurnService(provider, store, library, options);
+
+            var response = service.Handle("page-1", "produce then echo");
+
+            Assert.Equal("graph", response.Mode);
+            Assert.NotNull(response.Tasks);
+            var echoTask = response.Tasks!.Single(task => task.Type == "process" && task.Output.Contains("ECHOED="));
+            Assert.Contains("ECHOED=initial-value", echoTask.Output);
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("PATH", originalPath);
+            Directory.Delete(toolDir, recursive: true);
+        }
+    }
+
+    [Fact]
     public void Chat_App_Dynamic_Binding_Resolves_Upstream_Output_Inside_One_Graph()
     {
         var toolDir = Path.Combine(Path.GetTempPath(), $"ttasks-fake-teams-bind-{Guid.NewGuid():N}");

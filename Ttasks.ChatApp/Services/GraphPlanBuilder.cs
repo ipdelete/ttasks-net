@@ -25,15 +25,27 @@ public sealed class GraphPlanBuilder
     private static CoreTask CreateTask(GraphPlanTask task) =>
         task.Type.ToLowerInvariant() switch
         {
-            "prompt" => CoreTask.Prompt(
-                task.Prompt ?? string.Empty,
-                task.Title,
-                task.Description,
-                task.Timeout,
-                task.Metadata),
+            "prompt" => CreatePromptTask(task),
             "process" => CreateProcessTask(task),
             _ => throw new ArgumentException($"Unsupported task type '{task.Type}'.")
         };
+
+    private static CoreTask CreatePromptTask(GraphPlanTask task)
+    {
+        var metadata = new Dictionary<string, object?>(StringComparer.Ordinal)
+        {
+            ["planTaskId"] = task.Id
+        };
+        foreach (var entry in task.Metadata ?? new Dictionary<string, object?>())
+            metadata[entry.Key] = entry.Value;
+
+        return CoreTask.Prompt(
+            task.Prompt ?? string.Empty,
+            task.Title,
+            task.Description,
+            task.Timeout,
+            metadata);
+    }
 
     private static CoreTask CreateProcessTask(GraphPlanTask task)
     {
