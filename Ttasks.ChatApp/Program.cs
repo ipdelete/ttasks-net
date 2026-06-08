@@ -17,20 +17,7 @@ builder.Services.AddSingleton<ITaskStore>(services =>
 });
 builder.Services.AddSingleton<ITaskLibrary, StoreBackedTaskLibrary>();
 builder.Services.AddSingleton<TaskLibraryTemplateRenderer>();
-builder.Services.AddSingleton<IToolDocumentationProvider, ShellToolDocumentationProvider>();
-builder.Services.AddSingleton<ITeamsChatMetadataResolver, ShellTeamsChatMetadataResolver>();
-builder.Services.AddSingleton<TeamsCapabilityProvider>();
-builder.Services.AddSingleton<MailToolCapabilityProvider>();
-builder.Services.AddSingleton<CalendarTodayCapabilityProvider>();
-builder.Services.AddSingleton<AzureInventoryCapabilityProvider>();
-builder.Services.AddSingleton<ICapabilityProvider>(services =>
-    new CompositeCapabilityProvider(
-    [
-        services.GetRequiredService<TeamsCapabilityProvider>(),
-        services.GetRequiredService<MailToolCapabilityProvider>(),
-        services.GetRequiredService<CalendarTodayCapabilityProvider>(),
-        services.GetRequiredService<AzureInventoryCapabilityProvider>()
-    ]));
+builder.Services.AddSingleton<ICapabilityProvider, ConfigCapabilityProvider>();
 builder.Services.AddSingleton<GraphPlanValidator>();
 builder.Services.AddSingleton<GraphPlanBuilder>();
 builder.Services.AddSingleton<ChatSessionRegistry>();
@@ -38,6 +25,13 @@ builder.Services.AddSingleton<ChatTurnService>();
 builder.Services.AddSingleton<AdminService>();
 
 var app = builder.Build();
+
+using (var scope = app.Services.CreateScope())
+{
+    var library = scope.ServiceProvider.GetRequiredService<ITaskLibrary>();
+    var options = scope.ServiceProvider.GetRequiredService<Microsoft.Extensions.Options.IOptions<ChatAppOptions>>().Value;
+    TaskLibrarySeeder.Seed(library, options.LibrarySeed);
+}
 
 app.MapGet("/", () => Results.Content(
     """
@@ -127,7 +121,7 @@ app.MapGet("/api/admin/graphs", (AdminService admin, int? limit) =>
 
 app.MapGet("/api/admin/library", (AdminService admin) => Results.Ok(admin.TaskLibrary()));
 
-app.MapGet("/api/admin/capabilities", (AdminService admin) => Results.Ok(admin.Capabilities()));
+app.MapGet("/api/admin/capabilities", (AdminService admin) => Results.Ok(admin.AllowedTools()));
 
 app.MapGet("/api/admin/graphs/{id}", (string id, AdminService admin) =>
 {
@@ -421,13 +415,9 @@ static string CapabilitiesPage() =>
             const card = document.createElement('div');
             card.className = 'card';
             card.innerHTML = `
-              <div class="row"><h2>${escapeHtml(capability.displayName)}</h2><span class="badge">${escapeHtml(capability.kind)}</span></div>
-              <div class="muted">${escapeHtml(capability.type)} - ${escapeHtml(capability.policy)}</div>
-              <p>${escapeHtml(capability.description)}</p>
-              <p><strong>Availability:</strong> ${escapeHtml(capability.availability)}</p>
-              <p><strong>Task library:</strong> ${escapeHtml(capability.taskLibraryBehavior)}</p>
-              <h3>Examples</h3>
-              <ul>${capability.examples.map(example => `<li><code>${escapeHtml(example)}</code></li>`).join('')}</ul>`;
+              <div class="row"><h2><code>${escapeHtml(capability.prefix)}</code></h2></div>
+              <p>${escapeHtml(capability.description || '(no description)')}</p>
+              ${capability.helpCommand ? `<p><strong>Help:</strong> <code>${escapeHtml(capability.helpCommand)}</code></p>` : ''}`;
             capabilitiesEl.appendChild(card);
           }
         }
@@ -521,7 +511,7 @@ static string TaskLibraryPage() =>
             const card = document.createElement('div');
             card.className = `card ${item.key === selectedKey ? 'selected' : ''}`;
             card.innerHTML = `
-              <div class="row"><strong>${escapeHtml(item.displayName || item.key)}</strong><span class="badge">${escapeHtml(item.type)}</span></div>
+              <div class="row"><strong>${escapeHtml(item.displayName || item.key)}</strong></div>
               <div class="muted">${escapeHtml(item.key)}</div>
               <div class="muted">${fmtTime(item.createdAt)}</div>`;
             card.addEventListener('click', () => selectItem(item.key));
@@ -544,12 +534,12 @@ static string TaskLibraryPage() =>
             <dl>
               <dt>id</dt><dd>${escapeHtml(item.id)}</dd>
               <dt>key</dt><dd>${escapeHtml(item.key)}</dd>
-              <dt>type</dt><dd>${escapeHtml(item.type)}</dd>
+              <dt>fileName</dt><dd><code>${escapeHtml(item.fileName)}</code></dd>
               <dt>created</dt><dd>${fmtTime(item.createdAt)}</dd>
               <dt>description</dt><dd>${escapeHtml(item.description)}</dd>
             </dl>
-            <h3>Payload template</h3>
-            <pre>${escapeHtml(item.payloadTemplate)}</pre>
+            <h3>Args template</h3>
+            <pre>${escapeHtml(JSON.stringify(item.argsTemplate || [], null, 2))}</pre>
             <h3>Metadata</h3>
             <pre>${escapeHtml(JSON.stringify(item.metadata || {}, null, 2))}</pre>`;
         }

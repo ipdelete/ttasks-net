@@ -28,10 +28,11 @@ The project explores a safer pattern for LLM-assisted task execution:
 - in-memory and SQLite-backed stores
 - LLM prompt handlers through GitHub Copilot SDK integration
 - browser chat app with per-page shared sessions and replacement system prompt
-- capability policy modes: `full-tool`, `limited-tool`, and `fixed-template`
-- task library with parameterized payload templates and success-only promotion for full-tool candidates
-- Teams chat metadata enrichment and alias reuse
-- admin pages for graphs/tasks, capabilities, and task-library items
+- config-driven allowed-tool capability boundary (prefix is the policy)
+- task library with parameterized process templates and success-only promotion of planner-authored suggestions
+- bounded repair loop that retries with failure observations before giving up
+- complete-result planning guidance for "all/total/count/complete" requests
+- admin pages for graphs/tasks, allowed tools, and task-library items
 
 ## Requirements
 

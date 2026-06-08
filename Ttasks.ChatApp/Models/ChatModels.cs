@@ -24,8 +24,8 @@ public sealed record RouteDecision(
 
 public sealed record GraphPlan(
     GraphPlanInfo Graph,
-    IReadOnlyList<GraphPlanTask> Tasks,
-    IReadOnlyList<GraphPlanEdge> Edges);
+    List<GraphPlanTask> Tasks,
+    List<GraphPlanEdge> Edges);
 
 public sealed record GraphPlanInfo(
     string Title,
@@ -34,50 +34,40 @@ public sealed record GraphPlanInfo(
 public sealed record GraphPlanTask(
     string Id,
     string Type,
-    string? Payload = null,
+    string? Prompt = null,
+    ProcessSpec? Process = null,
+    LibrarySuggestion? LibrarySuggestion = null,
+    string? LibraryItemKey = null,
+    IReadOnlyDictionary<string, object?>? LibraryParameters = null,
     string? Title = null,
     string? Description = null,
     int? Timeout = null,
-    IReadOnlyDictionary<string, object?>? Metadata = null,
-    string? CapabilityId = null);
+    IReadOnlyDictionary<string, object?>? Metadata = null);
 
-public sealed record GraphPlanEdge(string From, string To);
+public sealed record ProcessSpec(string FileName, IReadOnlyList<string> Args);
 
-public sealed record TeamsReadScope(IReadOnlySet<string> AllowedCommands);
-
-public sealed record ToolTaskProposalSet(IReadOnlyList<ToolTaskProposal> Tasks);
-
-public sealed record ToolTaskProposal(
+public sealed record LibrarySuggestion(
     string Key,
     string DisplayName,
     string Description,
-    string Type,
-    string? PayloadTemplate = null,
-    string? FileName = null,
-    IReadOnlyList<string>? ArgsTemplate = null,
+    string FileName,
+    IReadOnlyList<string> ArgsTemplate,
     IReadOnlyList<TemplateParameter>? Parameters = null,
-    IReadOnlyDictionary<string, object?>? Metadata = null,
-    string? ToolCapabilityKind = null);
+    IReadOnlyDictionary<string, object?>? Metadata = null);
+
+public sealed record GraphPlanEdge(string From, string To);
 
 public sealed record AdminTaskLibraryItem(
     string Id,
     string Key,
     string DisplayName,
     string Description,
-    string Type,
-    string PayloadTemplate,
+    string FileName,
+    IReadOnlyList<string> ArgsTemplate,
     DateTimeOffset CreatedAt,
     IReadOnlyDictionary<string, object?> Metadata);
 
-public sealed record AdminCapabilityItem(
-    string Kind,
-    string DisplayName,
-    string Description,
-    string Type,
-    string Policy,
-    string Availability,
-    string TaskLibraryBehavior,
-    IReadOnlyList<string> Examples);
+public sealed record AdminAllowedTool(string Prefix, string? Description, string? HelpCommand);
 
 public sealed record AdminGraphSummary(
     string Id,

@@ -28,8 +28,6 @@ public sealed class ChatTurnService
     private readonly TaskLibraryTemplateRenderer _renderer;
     private readonly ChatAppOptions _options;
 
-    private const string CandidateDefinitionMetadataKey = "candidateDefinition";
-
     public ChatTurnService(
         ILlmProvider provider,
         GraphPlanValidator validator,
@@ -67,13 +65,19 @@ public sealed class ChatTurnService
             throw new InvalidOperationException($"Unknown route mode '{route.Mode}'.");
 
         var capabilities = _capabilities.GetCapabilities(new CapabilityRequest(activeSessionId, userMessage));
-        if (capabilities.Capabilities.Count == 0 && capabilities.Tools.Count == 0)
+        if (capabilities.AllowedTools.Count == 0)
             return new ChatResponse("answer", capabilities.EmptyMessage, activeSessionId);
-        var attempt = RunGraphAttempts(executor, llmSession, activeSessionId, userMessage, route.PlanIntent ?? userMessage, capabilities);
+
+        var attempt = RunGraphAttempts(executor, llmSession, userMessage, route.PlanIntent ?? userMessage, capabilities);
         return new ChatResponse("graph", attempt.Answer, activeSessionId, attempt.GraphId, attempt.Tasks);
     }
 
-    private GraphAttemptOutcome RunGraphAttempts(TaskExecutor planningExecutor, LlmAgentSession llmSession, string sessionId, string userMessage, string planIntent, CapabilitySet baseCapabilities)
+    private GraphAttemptOutcome RunGraphAttempts(
+        TaskExecutor planningExecutor,
+        LlmAgentSession llmSession,
+        string userMessage,
+        string planIntent,
+        CapabilitySet capabilities)
     {
         GraphAttemptOutcome? lastAttempt = null;
         var repairContext = string.Empty;
@@ -81,12 +85,6 @@ public sealed class ChatTurnService
 
         for (var attemptNumber = 1; attemptNumber <= maxAttempts; attemptNumber++)
         {
-            var capabilities = baseCapabilities.Tools.Count > 0
-                ? MaterializeToolCapabilities(planningExecutor, baseCapabilities, planIntent, repairContext)
-                : baseCapabilities;
-            if (capabilities.Capabilities.Count == 0)
-                return new GraphAttemptOutcome(capabilities.EmptyMessage, null, []);
-
             try
             {
                 var prompt = string.IsNullOrWhiteSpace(repairContext)
@@ -94,21 +92,22 @@ public sealed class ChatTurnService
                     : CreateRepairPlannerPrompt(userMessage, planIntent, capabilities, repairContext);
                 var planJson = planningExecutor.Execute(CoreTask.Prompt(prompt)).Output;
                 var plan = ParseJson<GraphPlan>(planJson);
+                ResolveLibraryReferences(plan, capabilities);
                 _validator.Validate(plan, capabilities);
 
                 var graphExecutor = CreatePromptExecutor(llmSession, includeUpstreamResults: true, _store);
-                RegisterExecutableCapabilities(graphExecutor, capabilities);
-                var graph = _builder.Build(plan, capabilities);
+                RegisterProcessHandler(graphExecutor);
+                var graph = _builder.Build(plan);
                 graph.Run(graphExecutor, maxWorkers: _options.MaxWorkers);
 
                 lastAttempt = ToOutcome(graph);
                 if (graph.Ok)
                 {
-                    PromoteUsedCandidateCapabilities(plan, capabilities);
+                    PromoteLibrarySuggestions(plan, graph);
                     return lastAttempt;
                 }
 
-                repairContext = CreateFailureObservation(attemptNumber, planJson, plan, capabilities, lastAttempt.Tasks);
+                repairContext = CreateFailureObservation(attemptNumber, planJson, plan, lastAttempt.Tasks);
             }
             catch (Exception ex) when (ex is JsonException or ArgumentException or InvalidOperationException)
             {
@@ -129,6 +128,26 @@ public sealed class ChatTurnService
                     ? DescribeGraphFailure(lastAttempt.Tasks)
                     : lastAttempt.Answer
             };
+    }
+
+    private void ResolveLibraryReferences(GraphPlan plan, CapabilitySet capabilities)
+    {
+        var libraryByKey = capabilities.LibrarySuggestions.ToDictionary(item => item.Key, StringComparer.Ordinal);
+        for (var i = 0; i < plan.Tasks.Count; i++)
+        {
+            var task = plan.Tasks[i];
+            if (!string.Equals(task.Type, "process", StringComparison.OrdinalIgnoreCase))
+                continue;
+            if (string.IsNullOrWhiteSpace(task.LibraryItemKey))
+                continue;
+            if (task.Process is not null)
+                continue;
+            if (!libraryByKey.TryGetValue(task.LibraryItemKey, out var item))
+                throw new InvalidOperationException($"Task '{task.Id}' references unknown libraryItemKey '{task.LibraryItemKey}'.");
+
+            var command = _renderer.Render(item, task.LibraryParameters);
+            plan.Tasks[i] = task with { Process = new ProcessSpec(command.FileName, command.Args.ToList()) };
+        }
     }
 
     private static GraphAttemptOutcome ToOutcome(TaskGraph graph)
@@ -162,31 +181,13 @@ public sealed class ChatTurnService
         return executor;
     }
 
-    private static void RegisterExecutableCapabilities(TaskExecutor executor, CapabilitySet capabilities)
+    private static void RegisterProcessHandler(TaskExecutor executor)
     {
-        var allowedPayloads = capabilities.Capabilities
-            .Where(capability => capability.TaskType == TaskType.Powershell)
-            .Select(capability => capability.Payload)
-            .ToHashSet(StringComparer.Ordinal);
-        var allowedProcessPayloads = capabilities.Capabilities
-            .Where(capability => capability.TaskType == TaskType.Process)
-            .Select(capability => capability.Payload)
-            .ToHashSet(StringComparer.Ordinal);
-
-        executor.Register(TaskType.Powershell, context =>
-        {
-            if (!allowedPayloads.Contains(context.Payload))
-                throw new InvalidOperationException("Only host-approved capability payloads are allowed in this experiment.");
-
-            return TaskExecutor.WithBuiltInHandlers().Execute(CoreTask.Powershell(context.Payload, timeout: context.Timeout)).Raw;
-        });
         executor.Register(TaskType.Process, context =>
         {
-            if (!allowedProcessPayloads.Contains(context.Payload))
-                throw new InvalidOperationException("Only host-approved capability payloads are allowed in this experiment.");
-
+            var command = ProcessCommand.FromJson(context.Payload);
             return TaskExecutor.WithBuiltInHandlers().Execute(CoreTask.Process(
-                ProcessCommand.FromJson(context.Payload),
+                command,
                 context.Title,
                 context.Description,
                 context.Timeout,
@@ -200,14 +201,14 @@ public sealed class ChatTurnService
 
         Return JSON only. Do not wrap it in Markdown.
 
-        If the user can be answered directly without reading Teams, running shell commands, or doing external actions, return:
+        If the user can be answered directly without reading external systems, running tool commands, or doing external actions, return:
         {
           "mode": "answer",
           "answer": "your concise answer",
           "planIntent": null
         }
 
-        If the user is asking to read Teams chats/channels, mail, calendar, Azure, fan out work, run commands, or summarize external outputs, return:
+        If the user is asking to use external tools, fan out work, run commands, or summarize external outputs, return:
         {
           "mode": "graph",
           "answer": null,
@@ -227,194 +228,47 @@ public sealed class ChatTurnService
 
         Schema:
         {
-          "graph": {
-            "title": "short title",
-            "metadata": { "source": "chat-ui" }
-          },
+          "graph": { "title": "short title", "metadata": { "source": "chat-ui" } },
           "tasks": [
             {
               "id": "stable-id",
-              "type": "powershell|prompt",
-              "capabilityId": "capability id for non-prompt tasks",
-              "payload": "prompt text for prompt tasks only",
-              "title": "optional title",
-              "description": "optional description",
+              "type": "process|prompt",
+              "process": { "fileName": "tool", "args": ["arg1", "arg2"] },
+              "prompt": "prompt text for prompt tasks only",
+              "libraryItemKey": "optional key of a library template to render and use as process",
+              "libraryParameters": { "optionalToken": "value" },
+              "librarySuggestion": {
+                "key": "stable.semantic.key",
+                "displayName": "short name",
+                "description": "what this does",
+                "fileName": "tool",
+                "argsTemplate": ["arg1", "arg2 with {token}"],
+                "parameters": [ { "name": "token", "source": "clock.now|clock.yesterday|clock.tomorrow|default", "format": "yyyy-MM-dd", "defaultValue": null } ]
+              },
+              "title": "optional",
+              "description": "optional",
               "timeout": {{_options.DefaultTimeoutSeconds}},
               "metadata": { "kind": "read" }
             }
           ],
-          "edges": [
-            { "from": "dependency-task-id", "to": "dependent-task-id" }
-          ]
+          "edges": [ { "from": "dep-id", "to": "consumer-id" } ]
         }
+
         Rules:
-        - Non-prompt tasks must reference one capabilityId from the catalog below.
-        - Do not include payload on non-prompt tasks.
-        - Do not invent, substitute, or add capability ids.
-        - Create one read task for each relevant capability so independent reads fan out.
-        - Add one final prompt task that summarizes upstream read outputs.
-        - The final prompt must depend on all read tasks.
+        - Use only the allowed tools listed below. Each "process" task's fileName plus leading non-flag args must start with one of the allowed prefixes (e.g. "mail", "teams read", "az account list").
+        - Prefer reusing a libraryItemKey from the library suggestions when one matches the request. The host will render that template and run it. Use libraryParameters to override values.
+        - When authoring a new strategy you expect to reuse later, include librarySuggestion so the host can promote it to the library after the graph succeeds. The fileName must match process.fileName and the args template head must also satisfy the allowed prefixes.
+        - For prompt tasks, set prompt text and do not include process/libraryItemKey/librarySuggestion.
+        - Independent reads should fan out. Add one final prompt task that summarizes upstream outputs and depends on all reads.
         - Use stable semantic task ids.
 
         {{CompleteResultGuidance}}
 
-        Capability catalog:
-        {{FormatCapabilityCatalog(capabilities)}}
-        """;
+        Allowed tools:
+        {{FormatAllowedTools(capabilities.AllowedTools)}}
 
-    private CapabilitySet MaterializeToolCapabilities(TaskExecutor executor, CapabilitySet capabilities, string planIntent, string repairContext)
-    {
-        var proposalJson = executor.Execute(CoreTask.Prompt(CreateToolAuthoringPrompt(planIntent, capabilities.Tools, repairContext))).Output;
-        var proposals = ParseJson<ToolTaskProposalSet>(proposalJson);
-        var toolByKind = capabilities.Tools.ToDictionary(tool => tool.Kind, StringComparer.Ordinal);
-        var authored = proposals.Tasks
-            .Select(proposal => ToCommandCapability(proposal, toolByKind))
-            .ToList();
-        var combined = capabilities.Capabilities.Concat(authored)
-            .Select((capability, index) => Renumber(capability, index))
-            .ToList();
-
-        return new CapabilitySet(combined, capabilities.EmptyMessage, capabilities.Tools);
-    }
-
-    private CommandCapability ToCommandCapability(ToolTaskProposal proposal, IReadOnlyDictionary<string, ToolCapability> toolByKind)
-    {
-        var toolKind = string.IsNullOrWhiteSpace(proposal.ToolCapabilityKind)
-            ? toolByKind.Keys.SingleOrDefault()
-            : proposal.ToolCapabilityKind;
-        if (string.IsNullOrWhiteSpace(toolKind) || !toolByKind.TryGetValue(toolKind, out var tool))
-            throw new InvalidOperationException($"Tool task proposal '{proposal.Key}' references an unavailable tool capability.");
-
-        ValidateToolProposal(proposal, tool);
-
-        var metadata = new Dictionary<string, object?>(proposal.Metadata ?? new Dictionary<string, object?>(), StringComparer.Ordinal)
-        {
-            ["capabilityKind"] = tool.Kind,
-            ["capabilityPolicy"] = tool.Policy,
-            ["toolName"] = tool.ToolName,
-            ["authoredFromToolCapability"] = true
-        };
-        var definition = new TaskLibraryDefinition(
-            proposal.Key,
-            proposal.DisplayName,
-            proposal.Description,
-            TaskType.Process,
-            proposal.PayloadTemplate ?? string.Empty,
-            proposal.Parameters ?? [],
-            metadata,
-            proposal.FileName,
-            proposal.ArgsTemplate ?? []);
-        var item = CreateCandidateItem(definition);
-        metadata = new Dictionary<string, object?>(item.Metadata, StringComparer.Ordinal)
-        {
-            ["candidateTaskLibraryKey"] = item.Key,
-            [CandidateDefinitionMetadataKey] = definition
-        };
-
-        return new CommandCapability(
-            "pending",
-            item.DisplayName,
-            item.Description,
-            item.TaskType,
-            item.TaskType == TaskType.Process
-                ? _renderer.RenderProcess(item).ToJson()
-                : _renderer.Render(item),
-            metadata);
-    }
-
-    private TaskLibraryItem CreateCandidateItem(TaskLibraryDefinition definition)
-    {
-        var metadata = new Dictionary<string, object?>(definition.Metadata, StringComparer.Ordinal)
-        {
-            [StoreBackedTaskLibrary.LibraryKeyKey] = definition.Key,
-            [StoreBackedTaskLibrary.TemplateParametersKey] = definition.Parameters.Select(parameter => new Dictionary<string, object?>(StringComparer.Ordinal)
-            {
-                ["name"] = parameter.Name,
-                ["source"] = parameter.Source,
-                ["format"] = parameter.Format,
-                ["defaultValue"] = parameter.DefaultValue
-            }).ToList(),
-            [StoreBackedTaskLibrary.ProcessFileNameKey] = definition.ProcessFileName,
-            [StoreBackedTaskLibrary.ProcessArgsTemplateKey] = definition.ProcessArgsTemplate?.ToList(),
-            ["candidateTaskLibraryItem"] = true
-        };
-
-        return new TaskLibraryItem(
-            $"candidate-{Guid.NewGuid():N}",
-            definition.Key,
-            definition.DisplayName,
-            definition.Description,
-            definition.TaskType,
-            definition.PayloadTemplate,
-            definition.Parameters,
-            metadata,
-            DateTimeOffset.UtcNow,
-            definition.ProcessFileName,
-            definition.ProcessArgsTemplate);
-    }
-
-    private static void ValidateToolProposal(ToolTaskProposal proposal, ToolCapability tool)
-    {
-        ArgumentException.ThrowIfNullOrWhiteSpace(proposal.Key);
-        ArgumentException.ThrowIfNullOrWhiteSpace(proposal.DisplayName);
-        ArgumentException.ThrowIfNullOrWhiteSpace(proposal.FileName);
-        if (proposal.ArgsTemplate is null)
-            throw new InvalidOperationException($"Tool task proposal '{proposal.Key}' must include argsTemplate.");
-        if (!string.Equals(proposal.Type, "process", StringComparison.OrdinalIgnoreCase))
-            throw new InvalidOperationException($"Tool task proposal '{proposal.Key}' must use process.");
-        if (!string.Equals(tool.Policy, "full", StringComparison.Ordinal))
-            throw new InvalidOperationException($"Tool capability '{tool.Kind}' does not allow LLM-authored templates.");
-        if (!string.Equals(proposal.FileName, tool.ToolName, StringComparison.Ordinal))
-            throw new InvalidOperationException($"Tool task proposal '{proposal.Key}' must use the '{tool.ToolName}' tool.");
-    }
-
-    private string CreateToolAuthoringPrompt(string planIntent, IReadOnlyList<ToolCapability> tools, string repairContext) =>
-        $$"""
-        Create task-library templates for the user's requested tool work.
-
-        Intent:
-        {{planIntent}}
-
-        {{FormatRepairContextForPrompt(repairContext)}}
-
-        Return JSON only. Do not wrap it in Markdown.
-
-        Schema:
-        {
-          "tasks": [
-            {
-              "key": "stable.semantic.key",
-              "displayName": "short user-facing name",
-              "description": "what this task does",
-              "type": "process",
-              "fileName": "tool executable name",
-              "argsTemplate": ["arg1", "arg2 with {token}"],
-              "toolCapabilityKind": "matching tool capability kind",
-              "parameters": [
-                { "name": "today", "source": "clock.now" },
-                { "name": "tomorrow", "source": "clock.tomorrow" },
-                { "name": "top", "source": "default", "defaultValue": 100 }
-              ],
-              "metadata": { "purpose": "search" }
-            }
-          ]
-        }
-
-        Rules:
-        - Create the minimum task templates needed for this intent.
-        - For CLI tools, create process templates with fileName and argsTemplate. Do not create powershell templates for tool calls.
-        - fileName must equal the listed toolName for the selected tool capability.
-        - argsTemplate must contain one array item per process argument.
-        - Use the tool documentation below to choose commands and flags.
-        - You may use template tokens such as {today:yyyy-MM-dd}, {yesterday:yyyy-MM-dd}, {tomorrow:yyyy-MM-dd}, and default parameters when useful.
-        - Supported parameter sources are clock.now, clock.yesterday, clock.tomorrow, default, and metadata:<key>.
-        - For full-tool capabilities, the approved tool is the boundary. Use any documented command, flag, or query shape for that tool that is needed to satisfy the user's request.
-        - Use stable keys because accepted templates are saved in the task library for reuse.
-
-        {{CompleteResultGuidance}}
-
-        Tool capabilities:
-        {{FormatToolCatalog(tools)}}
+        Library suggestions for this turn:
+        {{FormatLibrarySuggestions(capabilities.LibrarySuggestions)}}
         """;
 
     private string CreateRepairPlannerPrompt(string userMessage, string planIntent, CapabilitySet capabilities, string repairContext) =>
@@ -432,61 +286,60 @@ public sealed class ChatTurnService
 
         Return JSON only. Do not wrap it in Markdown.
 
-        Use the same schema and rules as the normal planner:
-        - Non-prompt tasks must reference one capabilityId from the catalog below.
-        - Do not include payload on non-prompt tasks.
-        - Do not invent, substitute, or add capability ids.
-        - Prefer changing only what is needed to recover from the failure.
-        - Add one final prompt task that summarizes upstream read outputs.
-        - The final prompt must depend on all read tasks.
+        Use the same schema and rules as the normal planner. Prefer changing only what is needed to recover from the failure. Do not repeat a failed command shape without changing it.
 
         {{CompleteResultGuidance}}
 
-        Capability catalog:
-        {{FormatCapabilityCatalog(capabilities)}}
+        Allowed tools:
+        {{FormatAllowedTools(capabilities.AllowedTools)}}
+
+        Library suggestions for this turn:
+        {{FormatLibrarySuggestions(capabilities.LibrarySuggestions)}}
         """;
 
-    private static string FormatRepairContextForPrompt(string repairContext) =>
-        string.IsNullOrWhiteSpace(repairContext)
-            ? string.Empty
-            : "Previous attempt failed. Use these observations to choose a corrected tool strategy before proposing templates:\n" + repairContext;
-
-    private void PromoteUsedCandidateCapabilities(GraphPlan plan, CapabilitySet capabilities)
+    private void PromoteLibrarySuggestions(GraphPlan plan, TaskGraph graph)
     {
-        var usedCapabilityIds = plan.Tasks
-            .Select(task => task.CapabilityId)
-            .Where(id => !string.IsNullOrWhiteSpace(id))
-            .ToHashSet(StringComparer.Ordinal);
+        var memberByPlanId = graph.Members
+            .Where(task => task.Metadata.TryGetValue("planTaskId", out var raw) && raw is string)
+            .ToDictionary(
+                task => (string)task.Metadata["planTaskId"]!,
+                task => task,
+                StringComparer.Ordinal);
 
-        foreach (var capability in capabilities.Capabilities.Where(capability => usedCapabilityIds.Contains(capability.Id)))
+        foreach (var planTask in plan.Tasks)
         {
-            if (capability.Metadata.TryGetValue(CandidateDefinitionMetadataKey, out var raw) && raw is TaskLibraryDefinition definition)
-                _library.GetOrAdd(definition);
+            if (planTask.LibrarySuggestion is null)
+                continue;
+            if (!memberByPlanId.TryGetValue(planTask.Id, out var coreTask))
+                continue;
+            if (coreTask.Status != Ttasks.Core.TaskStatus.Succeeded)
+                continue;
+
+            var suggestion = planTask.LibrarySuggestion;
+            _library.GetOrAdd(new TaskLibraryDefinition(
+                suggestion.Key,
+                suggestion.DisplayName,
+                suggestion.Description,
+                suggestion.FileName,
+                suggestion.ArgsTemplate.ToList(),
+                (suggestion.Parameters ?? []).ToList(),
+                suggestion.Metadata));
         }
     }
 
-    private static string CreateFailureObservation(int attemptNumber, string planJson, GraphPlan plan, CapabilitySet capabilities, IReadOnlyList<ChatTaskSummary> tasks) =>
+    private static string CreateFailureObservation(int attemptNumber, string planJson, GraphPlan plan, IReadOnlyList<ChatTaskSummary> tasks) =>
         JsonSerializer.Serialize(
             new
             {
                 attempt = attemptNumber,
                 previousPlan = planJson,
-                selectedCapabilities = plan.Tasks
-                    .Where(task => !string.IsNullOrWhiteSpace(task.CapabilityId))
+                processTasks = plan.Tasks
+                    .Where(task => string.Equals(task.Type, "process", StringComparison.OrdinalIgnoreCase))
                     .Select(task => new
                     {
                         task.Id,
-                        task.Type,
-                        task.CapabilityId,
-                        capability = capabilities.ById.TryGetValue(task.CapabilityId!, out var capability)
-                            ? new
-                            {
-                                capability.DisplayName,
-                                taskType = capability.TaskType == TaskType.Powershell ? "powershell" : capability.TaskType.ToString().ToLowerInvariant(),
-                                payload = capability.Payload,
-                                metadata = capability.Metadata
-                            }
-                            : null
+                        process = task.Process,
+                        libraryItemKey = task.LibraryItemKey
                     }),
                 failedTasks = tasks
                     .Where(task => task.Status is "Failed" or "Blocked" or "Cancelled")
@@ -556,40 +409,29 @@ public sealed class ChatTurnService
         return "The graph did not produce a final answer because one or more tasks failed:\n" + string.Join("\n", lines);
     }
 
-    private static string FormatCapabilityCatalog(CapabilitySet capabilities) =>
+    private static string FormatAllowedTools(IReadOnlyList<AllowedTool> tools) =>
         JsonSerializer.Serialize(
-            capabilities.Capabilities.Select(capability => new
-            {
-                id = capability.Id,
-                taskType = capability.TaskType == TaskType.Powershell ? "powershell" : capability.TaskType.ToString().ToLowerInvariant(),
-                displayName = capability.DisplayName,
-                description = capability.Description
-            }),
+            tools.Select(tool => new { prefix = tool.Prefix, description = tool.Description, helpCommand = tool.HelpCommand }),
             new JsonSerializerOptions(JsonSerializerDefaults.Web) { WriteIndented = true });
 
-    private static string FormatToolCatalog(IReadOnlyList<ToolCapability> tools) =>
+    private static string FormatLibrarySuggestions(IReadOnlyList<TaskLibraryItem> items) =>
         JsonSerializer.Serialize(
-            tools.Select(tool => new
+            items.Select(item => new
             {
-                kind = tool.Kind,
-                toolName = tool.ToolName,
-                displayName = tool.DisplayName,
-                description = tool.Description,
-                policy = tool.Policy,
-                documentation = tool.Documentation
+                key = item.Key,
+                displayName = item.DisplayName,
+                description = item.Description,
+                fileName = item.FileName,
+                argsTemplate = item.ArgsTemplate,
+                parameters = item.Parameters.Select(p => new
+                {
+                    name = p.Name,
+                    source = p.Source,
+                    format = p.Format,
+                    defaultValue = p.DefaultValue
+                })
             }),
             new JsonSerializerOptions(JsonSerializerDefaults.Web) { WriteIndented = true });
-
-    private static CommandCapability Renumber(CommandCapability capability, int index)
-    {
-        var id = $"cap-{index + 1}";
-        var metadata = new Dictionary<string, object?>(capability.Metadata, StringComparer.Ordinal)
-        {
-            ["capabilityId"] = id
-        };
-
-        return capability with { Id = id, Metadata = metadata };
-    }
 
     private sealed record GraphAttemptOutcome(
         string Answer,

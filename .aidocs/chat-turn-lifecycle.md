@@ -7,109 +7,30 @@ This document explains when each part of the chat pipeline runs.
 Use this path when the user asks something the LLM can answer without external tool output.
 
 1. Browser posts to `/api/chat`.
-2. `ChatTurnService` gets or creates a page session.
+2. `ChatTurnService` gets or creates a per-page LLM session.
 3. Router prompt returns `mode = "answer"`.
 4. The answer returns immediately.
-5. No graph is built and no external command runs.
 
 ## Graph/action turn
 
-Use this path when the user asks for external data, fan-out/fan-in work, shell-backed work, or summarization of tool output.
-
 1. Browser posts to `/api/chat`.
 2. Router prompt returns `mode = "graph"`.
-3. `ICapabilityProvider` derives host-approved capabilities for the turn.
-4. If no capabilities exist, the app returns the capability empty message.
-5. Full-tool capabilities run a tool-authoring prompt to create candidate task templates.
-6. Planner prompt receives only concrete capability IDs and descriptions.
-7. `GraphPlanValidator` validates the plan, topology, task types, capability IDs, and payload safety.
-8. `GraphPlanBuilder` turns capability IDs into `TaskGraph` tasks with host-resolved payloads.
-9. `TaskExecutor` runs the graph.
-10. If validation or execution fails, the app re-authors full-tool candidates and replans with failure observations until the repair budget is exhausted.
-11. A final prompt task summarizes upstream outputs.
-12. Graph/task state and results persist to SQLite.
-13. Successful full-tool candidates used by the winning plan are promoted to the task library.
-
-## Chat session setup
-
-`ChatSessionRegistry` creates and caches one `LlmAgentSession` per browser page/session ID.
-
-Sessions use:
-
-- `SystemMessageMode.Replace`
-- `SkipCustomInstructions = true`
-- system prompt loaded from `Ttasks.ChatApp\system-message.md`
-
-This makes the chat harness behavior reproducible and independent of repository or user custom instructions.
-
-## Router flow
-
-`ChatTurnService` first runs a small router prompt.
-
-The router returns JSON:
-
-```json
-{
-  "mode": "answer",
-  "answer": "direct response",
-  "planIntent": null
-}
-```
-
-or:
-
-```json
-{
-  "mode": "graph",
-  "answer": null,
-  "planIntent": "short actionable intent"
-}
-```
-
-Only graph turns ask capability providers for external work.
-
-## Graph planning
-
-The planner receives a concrete capability catalog:
-
-```json
-[
-  {
-    "id": "cap-1",
-    "taskType": "powershell",
-    "displayName": "Read Teams chat AET SWE Chat",
-    "description": "Read messages from a user-provided Teams chat."
-  }
-]
-```
-
-Planner rules:
-
-- Non-prompt tasks must reference a listed capability ID.
-- Non-prompt tasks must not include payload.
-- Prompt tasks contain prompt payloads.
-- A final prompt task summarizes upstream outputs.
-
-## Host-side payload resolution
-
-`GraphPlanBuilder` resolves executable payloads from selected capabilities.
-
-It preserves provenance metadata:
-
-- `capabilityId`
-- `capabilityDisplayName`
-- `capabilityKind`
-- `capabilityPolicy`
-- `toolName`
-- `libraryKey`
-- `libraryTaskId`
+3. `ConfigCapabilityProvider` returns the allowed tool list plus all task-library items as suggestions.
+4. If no allowed tools are configured, the chat returns the empty message.
+5. Planner prompt receives the user message, intent, allowed tool list, library suggestions, and complete-result guidance.
+6. The planner emits a graph plan with `process` and `prompt` tasks. Process tasks can either inline a `process: { fileName, args }`, reference a `libraryItemKey`, or include a `librarySuggestion` for promotion.
+7. The host resolves any `libraryItemKey` references by rendering the template into a `ProcessCommand`.
+8. `GraphPlanValidator` enforces topology, task ID shape, prompt presence, and the tool-prefix boundary for every process command (and library suggestion).
+9. `GraphPlanBuilder` builds the `TaskGraph` and tags each process task with its `planTaskId`.
+10. `TaskExecutor` runs the graph (prompt handler is the LLM session; process handler resolves the executable via PATH/PATHEXT and runs it with structured argv).
+11. If validation or execution fails, the host re-plans with failure observations (previous plan, failed task errors, blocked downstream tasks). The repair budget is `ChatApp:MaxGraphRepairAttempts`.
+12. On success, `librarySuggestion`s attached to successful process tasks are promoted to the task library.
+13. Graph/task state and results persist to SQLite.
 
 ## Repair loop
 
-Graph/action turns run with a bounded repair budget. A failed attempt records the previous plan, selected capability payloads, task errors, blocked tasks, and truncated output. The next attempt feeds those observations back into full-tool authoring and graph planning.
+Each attempt is bounded. Failure observations include the previous plan JSON, the process specs that ran, and the failing task errors. The planner is told to change only what is needed to recover.
 
-For full-tool capabilities, candidates are not saved to the task library before execution. The task library only receives candidates selected by a successful graph.
+## Complete-result strategy
 
-## Complete-result planning
-
-Planner and full-tool authoring prompts include tool-neutral guidance for requests like "all", "total count", and "complete summary". The planner should use documented count/all/paging mechanisms, fetch minimal stable IDs first, page until a documented end condition, de-duplicate by stable ID, and avoid exact totals when only a bounded page was observed.
+Planner and repair prompts include tool-neutral guidance: for "all/total/count/complete" requests, prove coverage with documented count/all/paging/cursor/offset/skip/next-page support, fetch minimal stable IDs, page until a documented end condition, de-duplicate by ID, and avoid exact totals from a single bounded page.

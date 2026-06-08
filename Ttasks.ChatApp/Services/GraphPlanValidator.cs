@@ -1,6 +1,5 @@
 using System.Text.RegularExpressions;
 using Microsoft.Extensions.Options;
-using Ttasks.Core;
 
 namespace Ttasks.ChatApp.Services;
 
@@ -13,9 +12,10 @@ public sealed partial class GraphPlanValidator
         _options = options.Value;
     }
 
-    public void Validate(GraphPlan plan, CapabilitySet? capabilities = null)
+    public void Validate(GraphPlan plan, CapabilitySet capabilities)
     {
         ArgumentNullException.ThrowIfNull(plan);
+        ArgumentNullException.ThrowIfNull(capabilities);
         if (plan.Graph is null)
             throw new ArgumentException("Plan graph is required.", nameof(plan));
         if (plan.Tasks.Count == 0)
@@ -45,65 +45,70 @@ public sealed partial class GraphPlanValidator
             throw new ArgumentException("Plan must include a final prompt task.", nameof(plan));
     }
 
-    private void ValidateTask(GraphPlanTask task, CapabilitySet? capabilities)
+    private void ValidateTask(GraphPlanTask task, CapabilitySet capabilities)
     {
         if (string.Equals(task.Type, "prompt", StringComparison.OrdinalIgnoreCase))
         {
-            if (string.IsNullOrWhiteSpace(task.Payload))
-                throw new ArgumentException($"Prompt task '{task.Id}' payload is required.");
-            if (!string.IsNullOrWhiteSpace(task.CapabilityId))
-                throw new ArgumentException($"Prompt task '{task.Id}' must not reference a capability.");
+            if (string.IsNullOrWhiteSpace(task.Prompt))
+                throw new ArgumentException($"Prompt task '{task.Id}' prompt is required.");
+            if (task.Process is not null)
+                throw new ArgumentException($"Prompt task '{task.Id}' must not include a process spec.");
+            if (task.LibrarySuggestion is not null || !string.IsNullOrWhiteSpace(task.LibraryItemKey))
+                throw new ArgumentException($"Prompt task '{task.Id}' must not reference a library template.");
             return;
         }
 
-        if (!string.Equals(task.Type, "powershell", StringComparison.OrdinalIgnoreCase)
-            && !string.Equals(task.Type, "process", StringComparison.OrdinalIgnoreCase))
+        if (!string.Equals(task.Type, "process", StringComparison.OrdinalIgnoreCase))
             throw new ArgumentException($"Task '{task.Id}' type '{task.Type}' is not allowed.");
 
-        if (!string.IsNullOrWhiteSpace(task.Payload))
-            throw new ArgumentException($"Task '{task.Id}' must not provide an executable payload; use capabilityId.");
+        if (task.Process is null)
+            throw new ArgumentException($"Process task '{task.Id}' must include a process spec.");
+        if (string.IsNullOrWhiteSpace(task.Process.FileName))
+            throw new ArgumentException($"Process task '{task.Id}' fileName is required.");
+        if (!IsAllowed(task.Process, capabilities.AllowedTools))
+            throw new ArgumentException(
+                $"Process task '{task.Id}' command '{Describe(task.Process)}' does not match any allowed tool prefix.");
 
-        if (string.IsNullOrWhiteSpace(task.CapabilityId))
-            throw new ArgumentException($"Task '{task.Id}' capabilityId is required.");
-
-        if (capabilities is null || !capabilities.ById.TryGetValue(task.CapabilityId, out var capability))
-            throw new ArgumentException($"Task '{task.Id}' references an unavailable capability.");
-
-        if (!string.Equals(task.Type, ToPlanType(capability.TaskType), StringComparison.OrdinalIgnoreCase))
-            throw new ArgumentException($"Task '{task.Id}' type does not match capability '{capability.Id}'.");
-
-        if (capability.Metadata.TryGetValue("capabilityKind", out var rawKind) && rawKind is string kind)
-            ValidateCapabilityPayload(capability, kind);
+        if (task.LibrarySuggestion is { } suggestion)
+        {
+            if (string.IsNullOrWhiteSpace(suggestion.Key))
+                throw new ArgumentException($"Process task '{task.Id}' library suggestion must include a key.");
+            if (!string.Equals(suggestion.FileName, task.Process.FileName, StringComparison.Ordinal))
+                throw new ArgumentException(
+                    $"Process task '{task.Id}' library suggestion fileName must match the process fileName.");
+            var probe = new ProcessSpec(suggestion.FileName, suggestion.ArgsTemplate);
+            if (!IsAllowed(probe, capabilities.AllowedTools))
+                throw new ArgumentException(
+                    $"Process task '{task.Id}' library suggestion '{suggestion.Key}' does not match any allowed tool prefix.");
+        }
     }
 
-    private static void ValidateCapabilityPayload(CommandCapability capability, string kind)
+    internal static bool IsAllowed(ProcessSpec process, IReadOnlyList<AllowedTool> allowed)
     {
-        var isValid = kind switch
-        {
-            "teams.read" => TeamsReadPattern().IsMatch(capability.Payload) || TeamsReadChannelPattern().IsMatch(capability.Payload),
-            "mail" => IsValidMailCapability(capability),
-            "mail.today" => MailTodayPattern().IsMatch(capability.Payload),
-            "calendar.today" => CalendarTodayPattern().IsMatch(capability.Payload),
-            "az.account.list" => capability.Payload == "az account list --only-show-errors --output json",
-            "az.group.list" => capability.Payload == "az group list --only-show-errors --output json",
-            "az.resource.list" => capability.Payload == "az resource list --only-show-errors --output json",
-            _ => throw new ArgumentException($"Capability '{capability.Id}' has unsupported kind '{kind}'.")
-        };
-
-        if (!isValid)
-            throw new ArgumentException($"Capability '{capability.Id}' does not resolve to a valid '{kind}' command.");
+        if (allowed.Count == 0)
+            return false;
+        var head = ComputeHead(process);
+        return allowed.Any(tool => HeadStartsWithPrefix(head, tool.Prefix));
     }
 
-    private static string ToPlanType(TaskType taskType) =>
-        taskType switch
-        {
-            TaskType.Powershell => "powershell",
-            TaskType.Process => "process",
-            TaskType.Prompt => "prompt",
-            TaskType.Bash => "bash",
-            TaskType.Agent => "agent",
-            _ => taskType.ToString().ToLowerInvariant()
-        };
+    private static string ComputeHead(ProcessSpec process)
+    {
+        var leadingArgs = process.Args.TakeWhile(arg => !arg.StartsWith("-", StringComparison.Ordinal));
+        return string.Join(' ', new[] { process.FileName }.Concat(leadingArgs));
+    }
+
+    private static bool HeadStartsWithPrefix(string head, string prefix)
+    {
+        prefix = prefix.Trim();
+        if (string.IsNullOrEmpty(prefix))
+            return false;
+        if (string.Equals(head, prefix, StringComparison.Ordinal))
+            return true;
+        return head.StartsWith(prefix + " ", StringComparison.Ordinal);
+    }
+
+    private static string Describe(ProcessSpec process) =>
+        string.Join(' ', new[] { process.FileName }.Concat(process.Args));
 
     private static void EnsureAcyclic(GraphPlan plan)
     {
@@ -136,72 +141,4 @@ public sealed partial class GraphPlanValidator
 
     [GeneratedRegex("^[A-Za-z0-9_.:-]{1,64}$")]
     private static partial Regex TaskIdPattern();
-
-    [GeneratedRegex("^teams read \\S+ -n \\d+ --json$")]
-    private static partial Regex TeamsReadPattern();
-
-    [GeneratedRegex("^teams read-channel \\S+ \\S+ -n \\d+ --json$")]
-    private static partial Regex TeamsReadChannelPattern();
-
-    [GeneratedRegex("^mail search --query '\\?\\$filter=receivedDateTime ge \\d{4}-\\d{2}-\\d{2}T00:00:00Z and receivedDateTime lt \\d{4}-\\d{2}-\\d{2}T00:00:00Z&\\$orderby=receivedDateTime desc&\\$top=\\d+' --json$")]
-    private static partial Regex MailTodayPattern();
-
-    [GeneratedRegex("^mail(\\s+.+)?$")]
-    private static partial Regex MailToolPattern();
-
-    [GeneratedRegex("^calendar list -s \\d{4}-\\d{2}-\\d{2}T00:00:00 -e \\d{4}-\\d{2}-\\d{2}T00:00:00 -n \\d+ --json$")]
-    private static partial Regex CalendarTodayPattern();
-
-    private static bool IsSingleCommand(string payload) =>
-        !payload.Contains('\n')
-        && !payload.Contains('\r')
-        && !payload.Contains("&&", StringComparison.Ordinal)
-        && !payload.Contains('|')
-        && !payload.Contains(';');
-
-    private static bool IsValidMailCommand(string payload)
-    {
-        return payload.Contains(" --query ", StringComparison.Ordinal)
-            ? MailSingleQuotedQueryPattern().IsMatch(payload)
-            : true;
-    }
-
-    private static bool IsValidMailCapability(CommandCapability capability)
-    {
-        if (capability.TaskType == TaskType.Process)
-            return IsValidMailProcessCommand(capability.Payload);
-
-        return MailToolPattern().IsMatch(capability.Payload)
-            && IsSingleCommand(capability.Payload)
-            && IsValidMailCommand(capability.Payload);
-    }
-
-    private static bool IsValidMailProcessCommand(string payload)
-    {
-        ProcessCommand command;
-        try
-        {
-            command = ProcessCommand.FromJson(payload);
-        }
-        catch (System.Text.Json.JsonException)
-        {
-            return false;
-        }
-        catch (InvalidOperationException)
-        {
-            return false;
-        }
-
-        if (!string.Equals(command.FileName, "mail", StringComparison.Ordinal))
-            return false;
-
-        var args = command.Args.ToList();
-        var queryIndex = args.FindIndex(arg => string.Equals(arg, "--query", StringComparison.Ordinal));
-        if (queryIndex < 0)
-            return true;
-        return queryIndex < args.Count - 1 && !string.IsNullOrWhiteSpace(args[queryIndex + 1]);
-    }
-
-    [GeneratedRegex("--query '\\?[^']+'")]
-    private static partial Regex MailSingleQuotedQueryPattern();
 }

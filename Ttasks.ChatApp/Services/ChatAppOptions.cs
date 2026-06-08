@@ -9,5 +9,31 @@ public sealed class ChatAppOptions
     public int MaxWorkers { get; set; } = 3;
     public int DefaultTimeoutSeconds { get; set; } = 30;
     public int MaxGraphRepairAttempts { get; set; } = 2;
-    public int MaxTeamsReadMessages { get; set; } = 20;
+    public List<AllowedToolConfig> AllowedTools { get; set; } = [];
+    public List<TaskLibrarySeed> LibrarySeed { get; set; } = [];
+}
+
+public sealed class AllowedToolConfig
+{
+    public string Prefix { get; set; } = string.Empty;
+    public string? Description { get; set; }
+    public string? HelpCommand { get; set; }
+}
+
+public sealed class TaskLibrarySeed
+{
+    public string Key { get; set; } = string.Empty;
+    public string DisplayName { get; set; } = string.Empty;
+    public string Description { get; set; } = string.Empty;
+    public string FileName { get; set; } = string.Empty;
+    public List<string> ArgsTemplate { get; set; } = [];
+    public List<TemplateParameterConfig> Parameters { get; set; } = [];
+}
+
+public sealed class TemplateParameterConfig
+{
+    public string Name { get; set; } = string.Empty;
+    public string Source { get; set; } = string.Empty;
+    public string? Format { get; set; }
+    public object? DefaultValue { get; set; }
 }

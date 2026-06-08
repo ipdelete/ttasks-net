@@ -1,36 +1,29 @@
 # Task library
 
-The task library stores reusable task templates. It lets the chat app remember useful operations and resource-specific commands over time.
+The task library stores reusable process-task templates so the chat app can remember strategies that worked.
 
 ## What gets stored
 
-Task-library items include:
+Each library item includes:
 
 - stable key
-- display name
-- description
-- task type
-- payload template
-- process file name and argument template, for `process` task items
+- display name and description
+- process `fileName` and `argsTemplate` (with `{token}` placeholders)
 - template parameters
 - metadata
 - created timestamp
 
-The library is backed by the existing `ITaskStore`. Library items are normal tasks with metadata, not a separate database schema.
+The library is backed by `ITaskStore`. Library items are normal tasks with a `taskLibraryItem` metadata flag, not a separate schema.
 
 ## When items are created
 
-Task-library items are created when:
-
-- a provider sees a reusable resource, such as a Teams chat ID
-- a fixed-template capability is first needed, such as `calendar.today`
-- a full-tool candidate template is selected by a graph that succeeds, such as a mail search
-
-Existing task-library items are reused on later turns.
+1. **Seeded**: `ChatApp:LibrarySeed` entries pre-populate deterministic templates on app startup (`calendar.today`, `az.account.list`, etc.).
+2. **Promoted from a successful graph**: when the planner emits a `process` task with a `librarySuggestion`, the host promotes that suggestion to the library only after the graph succeeds. Failed candidates stay transient.
+3. **Updated**: re-adding an existing key replaces the template if any field differs.
 
 ## Template parameters
 
-Templates support host-rendered parameters:
+Supported parameter sources:
 
 - `clock.now`
 - `clock.yesterday`
@@ -38,49 +31,27 @@ Templates support host-rendered parameters:
 - `default`
 - `metadata:<key>`
 
-Examples:
-
-```text
-calendar list -s {today:yyyy-MM-dd}T00:00:00 -e {tomorrow:yyyy-MM-dd}T00:00:00 -n {top} --json
-```
-
-```text
-teams read {chatId} -n {maxMessages} --json
-```
-
-Process templates store the executable separately from argv templates:
+Example process template:
 
 ```text
 fileName: mail
-argsTemplate: ["search", "--query", "?$filter=receivedDateTime ge {yesterday:yyyy-MM-dd}T00:00:00Z&$orderby=receivedDateTime desc&$top={top}", "--json"]
+argsTemplate: [
+  "search",
+  "--filter",
+  "receivedDateTime ge {start:yyyy-MM-dd}T00:00:00Z and receivedDateTime lt {end:yyyy-MM-dd}T00:00:00Z",
+  "--top", "{top}",
+  "--count", "--all-pages", "--json"
+]
+parameters: [
+  { name: "start", source: "clock.yesterday" },
+  { name: "end",   source: "clock.now" },
+  { name: "top",   source: "default", defaultValue: 100 }
+]
 ```
 
-Use process templates for external CLI tools. Use string payload templates for shell/script task types such as PowerShell. For full-tool capabilities, the app first executes in-memory candidates during the repair loop, then stores useful strategies selected by a successful graph instead of forcing every request through one fixed query shape.
+## Promotion vs reuse
 
-## Teams alias enrichment
+- The planner reuses a library item by setting `libraryItemKey` on a process task. The host renders it (with optional `libraryParameters` overrides) into a concrete `ProcessCommand` before validation and execution.
+- The planner suggests a new item by attaching `librarySuggestion` to a process task. The host stores it only after the graph succeeds.
 
-When a Teams chat URL or ID is first seen:
-
-1. `TeamsCapabilityProvider` extracts the chat ID.
-2. `ShellTeamsChatMetadataResolver` calls `teams chat-get <chat-id> --json`.
-3. The provider stores the chat topic and normalized aliases in task-library metadata.
-4. Later requests like `read teams chat aet swe chat` can resolve the saved library item by alias.
-
-Relevant metadata:
-
-- `teamsChatId`
-- `teamsChatTopic`
-- `teamsChatAliases`
-- `teamsChatMetadataError`
-
-## Provenance metadata
-
-Graph tasks created from library-backed capabilities preserve:
-
-- `capabilityId`
-- `capabilityDisplayName`
-- `capabilityKind`
-- `capabilityPolicy`
-- `toolName`
-- `libraryKey`
-- `libraryTaskId`
+This separates "things that worked" (library) from "things the model guessed" (transient).

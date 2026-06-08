@@ -5,10 +5,10 @@ namespace Ttasks.ChatApp.Services;
 
 public sealed class GraphPlanBuilder
 {
-    public TaskGraph Build(GraphPlan plan, CapabilitySet? capabilities = null)
+    public TaskGraph Build(GraphPlan plan)
     {
         var graph = new TaskGraph(plan.Graph.Title, plan.Graph.Metadata);
-        var tasks = plan.Tasks.ToDictionary(task => task.Id, task => CreateTask(task, capabilities), StringComparer.Ordinal);
+        var tasks = plan.Tasks.ToDictionary(task => task.Id, CreateTask, StringComparer.Ordinal);
         var dependencies = plan.Edges
             .GroupBy(edge => edge.To, StringComparer.Ordinal)
             .ToDictionary(group => group.Key, group => group.Select(edge => tasks[edge.From]).ToList(), StringComparer.Ordinal);
@@ -22,56 +22,40 @@ public sealed class GraphPlanBuilder
         return graph;
     }
 
-    private static CoreTask CreateTask(GraphPlanTask task, CapabilitySet? capabilities) =>
+    private static CoreTask CreateTask(GraphPlanTask task) =>
         task.Type.ToLowerInvariant() switch
         {
-            "powershell" => CreateCapabilityTask(task, capabilities),
-            "process" => CreateCapabilityTask(task, capabilities),
-            "prompt" => CoreTask.Prompt(task.Payload ?? string.Empty, task.Title, task.Description, task.Timeout, task.Metadata),
+            "prompt" => CoreTask.Prompt(
+                task.Prompt ?? string.Empty,
+                task.Title,
+                task.Description,
+                task.Timeout,
+                task.Metadata),
+            "process" => CreateProcessTask(task),
             _ => throw new ArgumentException($"Unsupported task type '{task.Type}'.")
         };
 
-    private static CoreTask CreateCapabilityTask(GraphPlanTask task, CapabilitySet? capabilities)
+    private static CoreTask CreateProcessTask(GraphPlanTask task)
     {
-        if (string.IsNullOrWhiteSpace(task.CapabilityId))
-            throw new ArgumentException($"Task '{task.Id}' capabilityId is required.");
-        if (capabilities is null || !capabilities.ById.TryGetValue(task.CapabilityId, out var capability))
-            throw new ArgumentException($"Task '{task.Id}' references an unavailable capability.");
+        if (task.Process is null)
+            throw new ArgumentException($"Process task '{task.Id}' must include a process spec.");
 
         var metadata = new Dictionary<string, object?>(StringComparer.Ordinal)
         {
-            ["capabilityId"] = capability.Id,
-            ["capabilityDisplayName"] = capability.DisplayName
+            ["planTaskId"] = task.Id
         };
-        if (capability.Metadata.TryGetValue(StoreBackedTaskLibrary.LibraryKeyKey, out var libraryKey))
-            metadata["libraryKey"] = libraryKey;
-        if (capability.Metadata.TryGetValue("libraryTaskId", out var libraryTaskId))
-            metadata["libraryTaskId"] = libraryTaskId;
-        if (capability.Metadata.TryGetValue("capabilityKind", out var kind))
-            metadata["capabilityKind"] = kind;
-        if (capability.Metadata.TryGetValue("capabilityPolicy", out var policy))
-            metadata["capabilityPolicy"] = policy;
-        if (capability.Metadata.TryGetValue("toolName", out var toolName))
-            metadata["toolName"] = toolName;
-
+        if (!string.IsNullOrWhiteSpace(task.LibraryItemKey))
+            metadata["libraryKey"] = task.LibraryItemKey;
+        if (task.LibrarySuggestion is { } suggestion)
+            metadata["librarySuggestionKey"] = suggestion.Key;
         foreach (var entry in task.Metadata ?? new Dictionary<string, object?>())
             metadata[entry.Key] = entry.Value;
 
-        return capability.TaskType switch
-        {
-            TaskType.Powershell => CoreTask.Powershell(
-                capability.Payload,
-                task.Title ?? capability.DisplayName,
-                task.Description ?? capability.Description,
-                task.Timeout,
-                metadata),
-            TaskType.Process => CoreTask.Process(
-                ProcessCommand.FromJson(capability.Payload),
-                task.Title ?? capability.DisplayName,
-                task.Description ?? capability.Description,
-                task.Timeout,
-                metadata),
-            _ => throw new ArgumentException($"Unsupported capability task type '{capability.TaskType}'.")
-        };
+        return CoreTask.Process(
+            new ProcessCommand(task.Process.FileName, task.Process.Args.ToList()),
+            task.Title,
+            task.Description,
+            task.Timeout,
+            metadata);
     }
 }
