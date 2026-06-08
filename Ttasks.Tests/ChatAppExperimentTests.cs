@@ -217,7 +217,7 @@ public sealed class ChatAppExperimentTests
             Assert.Equal("mail", good.FileName);
             Assert.DoesNotContain(items, item => item.Key == "mail.bad");
 
-            var admin = new AdminService(store, library, options);
+            var admin = new AdminService(store, library, new StoreBackedGraphLibrary(store), options);
             var turns = admin.RecentTurns();
             var turnSummary = Assert.Single(turns);
             Assert.Equal("page-1", turnSummary.SessionId);
@@ -304,7 +304,7 @@ public sealed class ChatAppExperimentTests
             Assert.Equal("AET SWE chat: alice said hello", response.Answer);
             Assert.Equal(6, provider.Requests.Count);
 
-            var admin = new AdminService(store, library, options);
+            var admin = new AdminService(store, library, new StoreBackedGraphLibrary(store), options);
             var turnSummary = Assert.Single(admin.RecentTurns());
             var turn = admin.GetTurn(turnSummary.TurnId);
             var continuationTasks = turn.Tasks.Where(task => task.Kind == "continuation").ToList();
@@ -405,6 +405,162 @@ public sealed class ChatAppExperimentTests
 
         var ex = Assert.Throws<ArgumentException>(() => validator.Validate(plan, MakeCapabilities("teams read")));
         Assert.Contains("unknown task 'missing'", ex.Message);
+    }
+
+    [Fact]
+    public void GraphLibrary_Roundtrips_Plan_Template_Through_Store()
+    {
+        var store = new InMemoryStore();
+        var library = new StoreBackedGraphLibrary(store);
+        var template = new GraphPlan(
+            new GraphPlanInfo("Discover then read", new Dictionary<string, object?> { ["kind"] = "workflow" }),
+            [
+                new GraphPlanTask("find", "process", Process: new ProcessSpec("teams", ["chat-list", "--topic", "{topic}", "--json"])),
+                new GraphPlanTask("read", "process", Process: new ProcessSpec("teams", ["read", "${{ tasks.find.output.chats[0].id }}"])),
+                new GraphPlanTask("summary", "prompt", Prompt: "summarize {topic} messages")
+            ],
+            [new GraphPlanEdge("find", "read"), new GraphPlanEdge("read", "summary")]);
+
+        var stored = library.GetOrAdd(new GraphLibraryDefinition(
+            "teams.chat.read-by-topic",
+            "Discover Teams chat by topic, read, summarize",
+            "Two-step workflow with parameterized topic.",
+            template,
+            [new TemplateParameter("topic", "user")]));
+
+        var all = library.All();
+        var item = Assert.Single(all, i => i.Key == "teams.chat.read-by-topic");
+        Assert.Equal(template.Tasks.Count, item.PlanTemplate.Tasks.Count);
+        Assert.Equal("teams", item.PlanTemplate.Tasks[0].Process!.FileName);
+        Assert.Equal("{topic}", item.PlanTemplate.Tasks[0].Process!.Args[2]);
+        Assert.Equal("summarize {topic} messages", item.PlanTemplate.Tasks[2].Prompt);
+        Assert.Equal("topic", Assert.Single(item.Parameters).Name);
+    }
+
+    [Fact]
+    public void Chat_App_Reuses_Graph_Library_Template_By_Key()
+    {
+        var toolDir = Path.Combine(Path.GetTempPath(), $"ttasks-fake-graphlib-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(toolDir);
+        File.WriteAllText(Path.Combine(toolDir, "teams.cmd"),
+            "@echo off\r\n" +
+            "if \"%1\"==\"chat-list\" ( echo {\"chats\":[{\"id\":\"19:xyz@thread.v2\",\"topic\":\"AET SWE\"}]} & exit /b 0 )\r\n" +
+            "if \"%1\"==\"read\" ( echo READ_CHAT=%2 & exit /b 0 )\r\n" +
+            "exit /b 1\r\n");
+        var originalPath = Environment.GetEnvironmentVariable("PATH");
+        try
+        {
+            Environment.SetEnvironmentVariable("PATH", toolDir + Path.PathSeparator + originalPath);
+            var store = new InMemoryStore();
+            var library = new StoreBackedTaskLibrary(store);
+            var graphLibrary = new StoreBackedGraphLibrary(store);
+
+            // Seed a graph library item with {topic} placeholder.
+            graphLibrary.GetOrAdd(new GraphLibraryDefinition(
+                "teams.chat.read-by-topic",
+                "Discover then read",
+                "Discover Teams chat by topic and read it.",
+                new GraphPlan(
+                    new GraphPlanInfo("Discover then read"),
+                    [
+                        new GraphPlanTask("find", "process", Process: new ProcessSpec("teams", ["chat-list", "--topic", "{topic}", "--json"])),
+                        new GraphPlanTask("read", "process", Process: new ProcessSpec("teams", ["read", "${{ tasks.find.output.chats[0].id }}"])),
+                        new GraphPlanTask("summary", "prompt", Prompt: "summarize")
+                    ],
+                    [new GraphPlanEdge("find", "read"), new GraphPlanEdge("read", "summary")]),
+                [new TemplateParameter("topic", "user")]));
+
+            var provider = new RecordingLlmProvider();
+            provider.QueueResult(LlmTurnResult.Text("""{"mode":"graph","answer":null,"planIntent":"find aet swe chat and read"}"""));
+            // Planner returns ONLY a graphLibraryKey + graphParameters; no tasks/edges.
+            provider.QueueResult(LlmTurnResult.Text("""
+                {
+                  "graph": { "title": "Reuse template" },
+                  "tasks": [],
+                  "edges": [],
+                  "graphLibraryKey": "teams.chat.read-by-topic",
+                  "graphParameters": { "topic": "aet swe" }
+                }
+                """));
+            provider.QueueResult(LlmTurnResult.Text("done"));
+
+            var options = Options.Create(new ChatAppOptions
+            {
+                MaxGraphRepairAttempts = 0,
+                MaxContinuationBatches = 0,
+                AllowedTools = [new AllowedToolConfig { Prefix = "teams chat-list" }, new AllowedToolConfig { Prefix = "teams read" }]
+            });
+            var service = CreateChatTurnService(provider, store, library, options, graphLibrary: graphLibrary);
+
+            var response = service.Handle("page-1", "read aet swe");
+
+            Assert.Equal("graph", response.Mode);
+            var readTask = Assert.Single(response.Tasks!, task => task.Output.Contains("READ_CHAT="));
+            Assert.Contains("READ_CHAT=19:xyz@thread.v2", readTask.Output);
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("PATH", originalPath);
+            Directory.Delete(toolDir, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void Chat_App_Promotes_Graph_Suggestion_After_Successful_Authored_Graph()
+    {
+        var toolDir = Path.Combine(Path.GetTempPath(), $"ttasks-fake-promote-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(toolDir);
+        File.WriteAllText(Path.Combine(toolDir, "echo.cmd"), "@echo off\r\necho OK=%1\r\nexit /b 0\r\n");
+        var originalPath = Environment.GetEnvironmentVariable("PATH");
+        try
+        {
+            Environment.SetEnvironmentVariable("PATH", toolDir + Path.PathSeparator + originalPath);
+            var store = new InMemoryStore();
+            var library = new StoreBackedTaskLibrary(store);
+            var graphLibrary = new StoreBackedGraphLibrary(store);
+
+            var provider = new RecordingLlmProvider();
+            provider.QueueResult(LlmTurnResult.Text("""{"mode":"graph","answer":null,"planIntent":"echo something"}"""));
+            provider.QueueResult(LlmTurnResult.Text("""
+                {
+                  "graph": { "title": "Echo workflow" },
+                  "tasks": [
+                    { "id": "echo", "type": "process", "process": { "fileName": "echo", "args": ["{value}"] } },
+                    { "id": "summary", "type": "prompt", "prompt": "report" }
+                  ],
+                  "edges": [{ "from": "echo", "to": "summary" }],
+                  "graphParameters": { "value": "hello" },
+                  "graphSuggestion": {
+                    "key": "echo.value",
+                    "displayName": "Echo a value",
+                    "description": "Run echo with a parameterized value.",
+                    "parameters": [{ "name": "value", "source": "user" }]
+                  }
+                }
+                """));
+            provider.QueueResult(LlmTurnResult.Text("done"));
+
+            var options = Options.Create(new ChatAppOptions
+            {
+                MaxGraphRepairAttempts = 0,
+                MaxContinuationBatches = 0,
+                AllowedTools = [new AllowedToolConfig { Prefix = "echo" }]
+            });
+            var service = CreateChatTurnService(provider, store, library, options, graphLibrary: graphLibrary);
+
+            var response = service.Handle("page-1", "echo hello");
+
+            Assert.Equal("graph", response.Mode);
+            var promoted = Assert.Single(graphLibrary.All(), item => item.Key == "echo.value");
+            Assert.Equal("Echo a value", promoted.DisplayName);
+            Assert.Equal("{value}", promoted.PlanTemplate.Tasks[0].Process!.Args[0]);
+            Assert.Equal("value", Assert.Single(promoted.Parameters).Name);
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("PATH", originalPath);
+            Directory.Delete(toolDir, recursive: true);
+        }
     }
 
     [Fact]
@@ -549,6 +705,7 @@ public sealed class ChatAppExperimentTests
         new(
             prefixes.Select(p => new AllowedTool(p)).ToList(),
             [],
+            [],
             "empty");
 
     private static ChatTurnService CreateChatTurnService(
@@ -556,10 +713,12 @@ public sealed class ChatAppExperimentTests
         ITaskStore? store = null,
         ITaskLibrary? library = null,
         IOptions<ChatAppOptions>? options = null,
-        ChatSessionRegistry? registry = null)
+        ChatSessionRegistry? registry = null,
+        IGraphLibrary? graphLibrary = null)
     {
         store ??= new InMemoryStore();
         library ??= new StoreBackedTaskLibrary(store);
+        graphLibrary ??= new StoreBackedGraphLibrary(store);
         options ??= Options.Create(new ChatAppOptions
         {
             AllowedTools = []
@@ -570,8 +729,9 @@ public sealed class ChatAppExperimentTests
             new GraphPlanBuilder(),
             registry ?? new ChatSessionRegistry(provider, options),
             store,
-            new ConfigCapabilityProvider(options, library),
+            new ConfigCapabilityProvider(options, library, graphLibrary),
             library,
+            graphLibrary,
             new TaskLibraryTemplateRenderer(),
             options);
     }

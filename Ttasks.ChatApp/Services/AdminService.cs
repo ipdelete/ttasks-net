@@ -11,12 +11,15 @@ public sealed class AdminService
     private readonly ITaskLibrary _library;
     private readonly ChatAppOptions _options;
 
-    public AdminService(ITaskStore store, ITaskLibrary library, IOptions<ChatAppOptions> options)
+    public AdminService(ITaskStore store, ITaskLibrary library, IGraphLibrary graphLibrary, IOptions<ChatAppOptions> options)
     {
         _store = store;
         _library = library;
+        _graphLibrary = graphLibrary;
         _options = options.Value;
     }
+
+    private readonly IGraphLibrary _graphLibrary;
 
     public IReadOnlyList<AdminGraphSummary> RecentGraphs(int limit = 50)
     {
@@ -79,6 +82,19 @@ public sealed class AdminService
                 item.Description,
                 item.FileName,
                 item.ArgsTemplate,
+                item.CreatedAt,
+                item.Metadata))
+            .ToList();
+
+    public IReadOnlyList<AdminGraphLibraryItem> GraphLibrary() =>
+        _graphLibrary.All()
+            .Select(item => new AdminGraphLibraryItem(
+                item.Id,
+                item.Key,
+                item.DisplayName,
+                item.Description,
+                item.PlanTemplate,
+                item.Parameters,
                 item.CreatedAt,
                 item.Metadata))
             .ToList();

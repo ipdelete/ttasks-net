@@ -6,6 +6,16 @@ internal static class Prompts
 {
     private static readonly JsonSerializerOptions WriteIndented = new(JsonSerializerDefaults.Web) { WriteIndented = true };
 
+    public const string GraphLibraryUsageGuidance =
+        """
+        Graph library usage:
+        - The "Graph library suggestions" list below contains known-good multi-task workflow templates with parameter slots. Each is a whole plan (tasks + edges) that recurs for many user requests.
+        - REUSE FIRST. If a graph template matches the user's intent, set `graphLibraryKey` to its key and `graphParameters` to the parameter values for this turn, and OMIT `tasks`/`edges` from your reply. The host will render the template and execute the resulting plan. Reusing a graph template is much higher leverage than reusing single-task templates.
+        - PROMOTE WHEN A WORKFLOW SHAPE RECURS. When you author a fresh plan whose topology + command shape would plausibly apply to many user requests with different inputs, attach `graphSuggestion: { key, displayName, description, parameters }`. Use `{paramName}` placeholders inside your `process.args[*]`, `prompt`, and `title` values to mark where parameters substitute. Promotion fires only after the whole graph succeeds; failed attempts never pollute the library.
+        - A graph suggestion key should be stable and semantic (e.g. `teams.chat.read-by-topic.summary`, `mail.received.countByDate.summary`).
+        - Do not set both `graphLibraryKey` (reuse) and `tasks`/`edges` (author fresh) in the same plan. Pick one.
+        """;
+
     public const string LibraryUsageGuidance =
         """
         Task library usage (read this every turn):
@@ -230,6 +240,8 @@ internal static class Prompts
 
         {{LibraryUsageGuidance}}
 
+        {{GraphLibraryUsageGuidance}}
+
         {{CompleteResultGuidance}}
 
         Allowed tools:
@@ -237,6 +249,9 @@ internal static class Prompts
 
         Library suggestions for this turn:
         {{FormatLibrarySuggestions(capabilities.LibrarySuggestions)}}
+
+        Graph library suggestions for this turn:
+        {{FormatGraphLibrarySuggestions(capabilities.GraphLibrarySuggestions)}}
         """;
 
     public static string Repair(string userMessage, string planIntent, CapabilitySet capabilities, string repairContext) =>
@@ -264,6 +279,8 @@ internal static class Prompts
 
         {{LibraryUsageGuidance}}
 
+        {{GraphLibraryUsageGuidance}}
+
         {{CompleteResultGuidance}}
 
         Allowed tools:
@@ -271,7 +288,28 @@ internal static class Prompts
 
         Library suggestions for this turn:
         {{FormatLibrarySuggestions(capabilities.LibrarySuggestions)}}
+
+        Graph library suggestions for this turn:
+        {{FormatGraphLibrarySuggestions(capabilities.GraphLibrarySuggestions)}}
         """;
+
+    public static string FormatGraphLibrarySuggestions(IReadOnlyList<GraphLibraryItem> items) =>
+        JsonSerializer.Serialize(
+            items.Select(item => new
+            {
+                key = item.Key,
+                displayName = item.DisplayName,
+                description = item.Description,
+                parameters = item.Parameters.Select(p => new
+                {
+                    name = p.Name,
+                    source = p.Source,
+                    format = p.Format,
+                    defaultValue = p.DefaultValue
+                }),
+                planTemplate = item.PlanTemplate
+            }),
+            WriteIndented);
 
     public static string Continuation(string userMessage, string planIntent, CapabilitySet capabilities, string batchHistory) =>
         $$"""

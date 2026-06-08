@@ -21,6 +21,7 @@ public sealed class ChatTurnService
     private readonly ITaskStore _store;
     private readonly ICapabilityProvider _capabilities;
     private readonly ITaskLibrary _library;
+    private readonly IGraphLibrary _graphLibrary;
     private readonly TaskLibraryTemplateRenderer _renderer;
     private readonly ChatAppOptions _options;
 
@@ -32,6 +33,7 @@ public sealed class ChatTurnService
         ITaskStore store,
         ICapabilityProvider capabilities,
         ITaskLibrary library,
+        IGraphLibrary graphLibrary,
         TaskLibraryTemplateRenderer renderer,
         IOptions<ChatAppOptions> options)
     {
@@ -42,6 +44,7 @@ public sealed class ChatTurnService
         _store = store;
         _capabilities = capabilities;
         _library = library;
+        _graphLibrary = graphLibrary;
         _renderer = renderer;
         _options = options.Value;
     }
@@ -209,7 +212,8 @@ public sealed class ChatTurnService
     {
         var allTasks = new List<ChatTaskSummary>();
         string? lastGraphId = null;
-        var plan = initialPlan;
+        var authoredPlan = initialPlan;
+        var plan = ResolveGraphLibraryReference(initialPlan);
         var repairContext = string.Empty;
         var maxAttempts = Math.Max(1, _options.MaxGraphRepairAttempts + 1);
 
@@ -233,6 +237,7 @@ public sealed class ChatTurnService
                 if (graph.Ok)
                 {
                     PromoteLibrarySuggestions(plan, graph);
+                    PromoteGraphSuggestion(authoredPlan, graph);
                     return new BatchOutcome(true, snapshot.Answer, lastGraphId, allTasks);
                 }
 
@@ -252,7 +257,8 @@ public sealed class ChatTurnService
                     out var repairError);
                 if (repaired is null)
                     return new BatchOutcome(false, $"Repair attempt {attempt + 1} failed to parse: {repairError}", lastGraphId, allTasks);
-                plan = repaired;
+                authoredPlan = repaired;
+                plan = ResolveGraphLibraryReference(repaired);
             }
             catch (Exception ex) when (ex is ArgumentException or InvalidOperationException)
             {
@@ -269,14 +275,105 @@ public sealed class ChatTurnService
                     "repair",
                     batchNumber,
                     attempt + 1,
-                    out var repairError);
+                    out var repairError2);
                 if (repaired is null)
-                    return new BatchOutcome(false, $"Repair attempt {attempt + 1} failed to parse: {repairError}", lastGraphId, allTasks);
-                plan = repaired;
+                    return new BatchOutcome(false, $"Repair attempt {attempt + 1} failed to parse: {repairError2}", lastGraphId, allTasks);
+                authoredPlan = repaired;
+                plan = ResolveGraphLibraryReference(repaired);
             }
         }
 
         return new BatchOutcome(false, "Batch exhausted repair attempts without success.", lastGraphId, allTasks);
+    }
+
+    private GraphPlan ResolveGraphLibraryReference(GraphPlan plan)
+    {
+        if (string.IsNullOrWhiteSpace(plan.GraphLibraryKey))
+            return plan;
+
+        var item = _graphLibrary.All().FirstOrDefault(candidate => string.Equals(candidate.Key, plan.GraphLibraryKey, StringComparison.Ordinal))
+            ?? throw new InvalidOperationException($"Plan references unknown graph library item '{plan.GraphLibraryKey}'.");
+
+        var rendered = RenderGraphTemplate(item, plan.GraphParameters);
+        return plan with
+        {
+            Graph = rendered.Graph,
+            Tasks = rendered.Tasks,
+            Edges = rendered.Edges
+        };
+    }
+
+    private GraphPlan RenderGraphTemplate(GraphLibraryItem item, IReadOnlyDictionary<string, object?>? overrides)
+    {
+        var renderedTasks = item.PlanTemplate.Tasks
+            .Select(task => RenderPlanTask(task, item.Parameters, overrides))
+            .ToList();
+        return item.PlanTemplate with
+        {
+            Tasks = renderedTasks,
+            Edges = item.PlanTemplate.Edges.ToList(),
+            GraphLibraryKey = null,
+            GraphParameters = null,
+            GraphSuggestion = null
+        };
+    }
+
+    private GraphPlanTask RenderPlanTask(GraphPlanTask task, IReadOnlyList<TemplateParameter> parameters, IReadOnlyDictionary<string, object?>? overrides)
+    {
+        var rendered = task with
+        {
+            Title = _renderer.RenderText(task.Title ?? string.Empty, parameters, overrides),
+            Description = _renderer.RenderText(task.Description ?? string.Empty, parameters, overrides),
+            Prompt = task.Prompt is null ? null : _renderer.RenderText(task.Prompt, parameters, overrides)
+        };
+        if (string.IsNullOrEmpty(task.Title)) rendered = rendered with { Title = null };
+        if (string.IsNullOrEmpty(task.Description)) rendered = rendered with { Description = null };
+
+        if (task.Process is { } process)
+        {
+            var renderedArgs = process.Args.Select(arg => _renderer.RenderText(arg, parameters, overrides)).ToList();
+            rendered = rendered with
+            {
+                Process = new ProcessSpec(_renderer.RenderText(process.FileName, parameters, overrides), renderedArgs)
+            };
+        }
+
+        if (task.LibraryParameters is { } libraryParams)
+        {
+            var renderedLibParams = libraryParams.ToDictionary(
+                kvp => kvp.Key,
+                kvp => (object?)(kvp.Value is string s ? _renderer.RenderText(s, parameters, overrides) : kvp.Value),
+                StringComparer.Ordinal);
+            rendered = rendered with { LibraryParameters = renderedLibParams };
+        }
+
+        return rendered;
+    }
+
+    private void PromoteGraphSuggestion(GraphPlan authoredPlan, TaskGraph graph)
+    {
+        if (authoredPlan.GraphSuggestion is null)
+            return;
+        if (!string.IsNullOrWhiteSpace(authoredPlan.GraphLibraryKey))
+            return;
+        if (authoredPlan.Tasks.Count == 0)
+            return;
+        if (!graph.Ok)
+            return;
+
+        var s = authoredPlan.GraphSuggestion;
+        var template = new GraphPlan(
+            authoredPlan.Graph,
+            authoredPlan.Tasks.ToList(),
+            authoredPlan.Edges.ToList());
+
+        _graphLibrary.GetOrAdd(new GraphLibraryDefinition(
+            s.Key,
+            s.DisplayName,
+            s.Description,
+            template,
+            s.Parameters ?? [],
+            s.Metadata));
     }
 
     private static void TagGraphTasks(TaskGraph graph, string turnId, string sessionId, int batchNumber, int attemptNumber)

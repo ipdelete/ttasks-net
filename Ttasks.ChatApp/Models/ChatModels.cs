@@ -30,7 +30,17 @@ public sealed record ContinuationDecision(
 public sealed record GraphPlan(
     GraphPlanInfo Graph,
     List<GraphPlanTask> Tasks,
-    List<GraphPlanEdge> Edges);
+    List<GraphPlanEdge> Edges,
+    string? GraphLibraryKey = null,
+    IReadOnlyDictionary<string, object?>? GraphParameters = null,
+    GraphLibrarySuggestion? GraphSuggestion = null);
+
+public sealed record GraphLibrarySuggestion(
+    string Key,
+    string DisplayName,
+    string Description,
+    IReadOnlyList<TemplateParameter>? Parameters = null,
+    IReadOnlyDictionary<string, object?>? Metadata = null);
 
 public sealed record GraphPlanInfo(
     string Title,
@@ -73,6 +83,16 @@ public sealed record AdminTaskLibraryItem(
     IReadOnlyDictionary<string, object?> Metadata);
 
 public sealed record AdminAllowedTool(string Prefix, string? Description, string? HelpCommand);
+
+public sealed record AdminGraphLibraryItem(
+    string Id,
+    string Key,
+    string DisplayName,
+    string Description,
+    GraphPlan PlanTemplate,
+    IReadOnlyList<TemplateParameter> Parameters,
+    DateTimeOffset CreatedAt,
+    IReadOnlyDictionary<string, object?> Metadata);
 
 public sealed record AdminTurnSummary(
     string TurnId,

@@ -16,6 +16,7 @@ builder.Services.AddSingleton<ITaskStore>(services =>
     return new SqliteStore(path);
 });
 builder.Services.AddSingleton<ITaskLibrary, StoreBackedTaskLibrary>();
+builder.Services.AddSingleton<IGraphLibrary, StoreBackedGraphLibrary>();
 builder.Services.AddSingleton<TaskLibraryTemplateRenderer>();
 builder.Services.AddSingleton<ICapabilityProvider, ConfigCapabilityProvider>();
 builder.Services.AddSingleton<GraphPlanValidator>();
@@ -112,6 +113,7 @@ app.MapPost("/api/chat", (ChatRequest request, ChatTurnService chat) =>
 app.MapGet("/admin", () => Results.Content(AdminPage(), "text/html"));
 app.MapGet("/admin/capabilities", () => Results.Content(CapabilitiesPage(), "text/html"));
 app.MapGet("/admin/library", () => Results.Content(TaskLibraryPage(), "text/html"));
+app.MapGet("/admin/graph-library", () => Results.Content(GraphLibraryPage(), "text/html"));
 app.MapGet("/admin/turns", () => Results.Content(TurnsPage(), "text/html"));
 
 app.MapGet("/api/admin/graphs", (AdminService admin, int? limit) =>
@@ -121,6 +123,7 @@ app.MapGet("/api/admin/graphs", (AdminService admin, int? limit) =>
 });
 
 app.MapGet("/api/admin/library", (AdminService admin) => Results.Ok(admin.TaskLibrary()));
+app.MapGet("/api/admin/graph-library", (AdminService admin) => Results.Ok(admin.GraphLibrary()));
 
 app.MapGet("/api/admin/capabilities", (AdminService admin) => Results.Ok(admin.AllowedTools()));
 
@@ -232,6 +235,7 @@ static string AdminPage() =>
             <a href="/admin/turns">Turns</a>
             <a href="/admin/capabilities">Capabilities</a>
             <a href="/admin/library">Task library</a>
+            <a href="/admin/graph-library">Graph library</a>
           </nav>
         </div>
         <button id="refresh">Refresh</button>
@@ -413,6 +417,7 @@ static string CapabilitiesPage() =>
             <a href="/admin/turns">Turns</a>
             <strong>Capabilities</strong>
             <a href="/admin/library">Task library</a>
+            <a href="/admin/graph-library">Graph library</a>
           </nav>
         </div>
         <button id="refresh">Refresh</button>
@@ -635,6 +640,7 @@ static string TurnsPage() =>
             <strong>Turns</strong>
             <a href="/admin/capabilities">Capabilities</a>
             <a href="/admin/library">Task library</a>
+            <a href="/admin/graph-library">Graph library</a>
           </nav>
         </div>
         <button id="refresh">Refresh</button>
@@ -767,6 +773,127 @@ static string TurnsPage() =>
         }
 
         loadTurns();
+      </script>
+    </body>
+    </html>
+    """;
+
+static string GraphLibraryPage() =>
+    """
+    <!doctype html>
+    <html lang="en">
+    <head>
+      <meta charset="utf-8" />
+      <meta name="viewport" content="width=device-width, initial-scale=1" />
+      <title>ttasks graph library</title>
+      <style>
+        :root { color-scheme: light dark; --border: #d0d7de; --muted: #57606a; --bg: #f6f8fa; --code-bg: #f6f8fa; --code-fg: #24292f; }
+        @media (prefers-color-scheme: dark) {
+          :root { --border: #8b949e; --muted: #8b949e; --bg: #161b22; --code-bg: #161b22; --code-fg: #e6edf3; }
+        }
+        body { font-family: system-ui, sans-serif; margin: 0; }
+        header { border-bottom: 1px solid var(--border); padding: 1rem; display: flex; justify-content: space-between; align-items: center; }
+        nav { display: flex; gap: .75rem; margin-top: .5rem; }
+        nav a { color: inherit; }
+        main { display: grid; grid-template-columns: 360px minmax(360px, 1fr); min-height: calc(100vh - 65px); }
+        section { border-right: 1px solid var(--border); padding: 1rem; overflow: auto; }
+        section:last-child { border-right: 0; }
+        h1, h2, h3 { margin: 0 0 .75rem; }
+        button { border: 1px solid var(--border); border-radius: .4rem; background: canvas; padding: .4rem .6rem; cursor: pointer; }
+        .list { display: grid; gap: .5rem; }
+        .card { border: 1px solid var(--border); border-radius: .5rem; padding: .7rem; background: canvas; cursor: pointer; }
+        .card:hover, .card.selected { outline: 2px solid #0969da; }
+        .muted { color: var(--muted); font-size: .85rem; }
+        .row { display: flex; gap: .5rem; align-items: center; justify-content: space-between; }
+        pre { white-space: pre-wrap; overflow-wrap: anywhere; background: var(--code-bg); color: var(--code-fg); padding: .75rem; border-radius: .5rem; max-height: 45vh; overflow: auto; }
+        dl { display: grid; grid-template-columns: 8rem 1fr; gap: .35rem .75rem; }
+        dt { color: var(--muted); }
+        dd { margin: 0; overflow-wrap: anywhere; }
+      </style>
+    </head>
+    <body>
+      <header>
+        <div>
+          <h1>ttasks graph library</h1>
+          <div class="muted">Reusable multi-task workflow templates</div>
+          <nav>
+            <a href="/admin">Graphs and tasks</a>
+            <a href="/admin/turns">Turns</a>
+            <a href="/admin/capabilities">Capabilities</a>
+            <a href="/admin/library">Task library</a>
+            <strong>Graph library</strong>
+          </nav>
+        </div>
+        <button id="refresh">Refresh</button>
+      </header>
+      <main>
+        <section>
+          <h2>Graph templates</h2>
+          <div id="items" class="list">Loading...</div>
+        </section>
+        <section>
+          <h2>Template detail</h2>
+          <div id="detail">Select a template.</div>
+        </section>
+      </main>
+      <script>
+        const itemsEl = document.getElementById('items');
+        const detailEl = document.getElementById('detail');
+        let items = [];
+        let selectedKey = null;
+        document.getElementById('refresh').addEventListener('click', loadItems);
+
+        async function loadItems() {
+          itemsEl.textContent = 'Loading...';
+          items = await fetch('/api/admin/graph-library').then(r => r.json());
+          itemsEl.innerHTML = '';
+          if (items.length === 0) {
+            itemsEl.textContent = 'No graph templates yet. The planner promotes graph templates after a successful authored graph that included a graphSuggestion.';
+            detailEl.textContent = 'No templates are available.';
+            return;
+          }
+          for (const item of items) {
+            const card = document.createElement('div');
+            card.className = `card ${item.key === selectedKey ? 'selected' : ''}`;
+            card.innerHTML = `
+              <div class="row"><strong>${escapeHtml(item.displayName || item.key)}</strong></div>
+              <div class="muted">${escapeHtml(item.key)}</div>
+              <div class="muted">${item.planTemplate.tasks.length} tasks - ${fmtTime(item.createdAt)}</div>`;
+            card.addEventListener('click', () => selectItem(item.key));
+            itemsEl.appendChild(card);
+          }
+          if (!selectedKey) selectItem(items[0].key);
+        }
+
+        function selectItem(key) {
+          selectedKey = key;
+          const item = items.find(i => i.key === key);
+          if (!item) return;
+          for (const card of itemsEl.children) {
+            const muted = card.querySelector('.muted');
+            card.classList.toggle('selected', muted && muted.textContent === key);
+          }
+          const params = (item.parameters || []).map(p => `${escapeHtml(p.name)} (${escapeHtml(p.source)}${p.defaultValue !== null && p.defaultValue !== undefined ? ', default=' + escapeHtml(String(p.defaultValue)) : ''})`).join(', ');
+          detailEl.innerHTML = `
+            <h3>${escapeHtml(item.displayName || item.key)}</h3>
+            <dl>
+              <dt>key</dt><dd>${escapeHtml(item.key)}</dd>
+              <dt>created</dt><dd>${fmtTime(item.createdAt)}</dd>
+              <dt>description</dt><dd>${escapeHtml(item.description)}</dd>
+              <dt>parameters</dt><dd>${params || '(none)'}</dd>
+            </dl>
+            <h3>Plan template</h3>
+            <pre>${escapeHtml(JSON.stringify(item.planTemplate, null, 2))}</pre>`;
+        }
+
+        function fmtTime(value) { return new Date(value).toLocaleString(); }
+        function escapeHtml(value) {
+          return String(value ?? '').replace(/[&<>"']/g, ch => ({
+            '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+          }[ch]));
+        }
+
+        loadItems();
       </script>
     </body>
     </html>

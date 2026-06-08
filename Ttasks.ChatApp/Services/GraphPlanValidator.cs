@@ -43,6 +43,20 @@ public sealed partial class GraphPlanValidator
         EnsureAcyclic(plan);
         if (!plan.Tasks.Any(task => string.Equals(task.Type, "prompt", StringComparison.OrdinalIgnoreCase)))
             throw new ArgumentException("Plan must include a final prompt task.", nameof(plan));
+
+        ValidateGraphSuggestion(plan.GraphSuggestion);
+    }
+
+    private static void ValidateGraphSuggestion(GraphLibrarySuggestion? suggestion)
+    {
+        if (suggestion is null)
+            return;
+        if (string.IsNullOrWhiteSpace(suggestion.Key))
+            throw new ArgumentException("Graph suggestion must include a stable key.", nameof(suggestion));
+        if (string.IsNullOrWhiteSpace(suggestion.DisplayName))
+            throw new ArgumentException("Graph suggestion must include a display name.", nameof(suggestion));
+        if (string.IsNullOrWhiteSpace(suggestion.Description))
+            throw new ArgumentException("Graph suggestion must include a description.", nameof(suggestion));
     }
 
     private void ValidateTask(GraphPlanTask task, CapabilitySet capabilities, GraphPlan plan)
