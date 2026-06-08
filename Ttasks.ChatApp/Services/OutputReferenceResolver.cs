@@ -110,7 +110,10 @@ internal static partial class OutputReferenceResolver
                 if (node is not JsonArray array)
                     throw new InvalidOperationException($"Cannot index [{token.Index}] into non-array value.");
                 if (token.Index < 0 || token.Index >= array.Count)
-                    throw new InvalidOperationException($"Index [{token.Index}] is out of range for array of length {array.Count}.");
+                    throw new InvalidOperationException(
+                        $"Cannot navigate index [{token.Index}] because the upstream array had {array.Count} item(s). "
+                        + "The upstream task ran but produced no matching result (e.g. a discovery query returned an empty list). "
+                        + "Either widen the discovery, narrow the bound to an index that exists, or insert a prompt task that handles the empty case before the consumer.");
                 node = array[token.Index];
             }
             else

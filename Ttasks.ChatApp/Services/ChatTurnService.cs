@@ -257,8 +257,8 @@ public sealed class ChatTurnService
                     out var repairError);
                 if (repaired is null)
                     return new BatchOutcome(false, $"Repair attempt {attempt + 1} failed to parse: {repairError}", lastGraphId, allTasks);
-                authoredPlan = repaired;
-                plan = ResolveGraphLibraryReference(repaired);
+                authoredPlan = CarryForwardSuggestion(repaired, authoredPlan);
+                plan = ResolveGraphLibraryReference(authoredPlan);
             }
             catch (Exception ex) when (ex is ArgumentException or InvalidOperationException)
             {
@@ -278,12 +278,21 @@ public sealed class ChatTurnService
                     out var repairError2);
                 if (repaired is null)
                     return new BatchOutcome(false, $"Repair attempt {attempt + 1} failed to parse: {repairError2}", lastGraphId, allTasks);
-                authoredPlan = repaired;
-                plan = ResolveGraphLibraryReference(repaired);
+                authoredPlan = CarryForwardSuggestion(repaired, authoredPlan);
+                plan = ResolveGraphLibraryReference(authoredPlan);
             }
         }
 
         return new BatchOutcome(false, "Batch exhausted repair attempts without success.", lastGraphId, allTasks);
+    }
+
+    private static GraphPlan CarryForwardSuggestion(GraphPlan repaired, GraphPlan previousAuthored)
+    {
+        if (repaired.GraphSuggestion is not null)
+            return repaired;
+        if (previousAuthored.GraphSuggestion is null)
+            return repaired;
+        return repaired with { GraphSuggestion = previousAuthored.GraphSuggestion };
     }
 
     private GraphPlan ResolveGraphLibraryReference(GraphPlan plan)

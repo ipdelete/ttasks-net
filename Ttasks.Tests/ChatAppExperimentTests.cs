@@ -336,6 +336,92 @@ public sealed class ChatAppExperimentTests
     }
 
     [Fact]
+    public void OutputReferenceResolver_Empty_Array_Index_Error_Explains_Discovery_Returned_No_Match()
+    {
+        var upstream = new Dictionary<string, string>(StringComparer.Ordinal)
+        {
+            ["find"] = """{"chats":[]}"""
+        };
+
+        var ex = Assert.Throws<InvalidOperationException>(() =>
+            OutputReferenceResolver.Resolve("${{ tasks.find.output.chats[0].id }}", upstream));
+
+        Assert.Contains("had 0 item(s)", ex.Message);
+        Assert.Contains("discovery", ex.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void Chat_App_Carries_Forward_Graph_Suggestion_From_Failed_Original_Plan_Into_Repair()
+    {
+        var toolDir = Path.Combine(Path.GetTempPath(), $"ttasks-fake-repairsugg-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(toolDir);
+        File.WriteAllText(Path.Combine(toolDir, "echo.cmd"),
+            "@echo off\r\n" +
+            "if \"%1\"==\"bad\" exit /b 1\r\n" +
+            "echo OK=%1\r\nexit /b 0\r\n");
+        var originalPath = Environment.GetEnvironmentVariable("PATH");
+        try
+        {
+            Environment.SetEnvironmentVariable("PATH", toolDir + Path.PathSeparator + originalPath);
+            var store = new InMemoryStore();
+            var library = new StoreBackedTaskLibrary(store);
+            var graphLibrary = new StoreBackedGraphLibrary(store);
+
+            var provider = new RecordingLlmProvider();
+            provider.QueueResult(LlmTurnResult.Text("""{"mode":"graph","answer":null,"planIntent":"echo something"}"""));
+            // First attempt: includes graphSuggestion but the process fails (arg="bad").
+            provider.QueueResult(LlmTurnResult.Text("""
+                {
+                  "graph": { "title": "Echo workflow" },
+                  "tasks": [
+                    { "id": "echo", "type": "process", "process": { "fileName": "echo", "args": ["bad"] } },
+                    { "id": "summary", "type": "prompt", "prompt": "report" }
+                  ],
+                  "edges": [{ "from": "echo", "to": "summary" }],
+                  "graphParameters": { "value": "bad" },
+                  "graphSuggestion": {
+                    "key": "echo.value",
+                    "displayName": "Echo a value",
+                    "description": "Run echo with a parameterized value.",
+                    "parameters": [{ "name": "value", "source": "user" }]
+                  }
+                }
+                """));
+            // Repair attempt: fixes the process but OMITS graphSuggestion (planner forgot).
+            provider.QueueResult(LlmTurnResult.Text("""
+                {
+                  "graph": { "title": "Echo workflow repaired" },
+                  "tasks": [
+                    { "id": "echo", "type": "process", "process": { "fileName": "echo", "args": ["good"] } },
+                    { "id": "summary", "type": "prompt", "prompt": "report" }
+                  ],
+                  "edges": [{ "from": "echo", "to": "summary" }]
+                }
+                """));
+            provider.QueueResult(LlmTurnResult.Text("done"));
+
+            var options = Options.Create(new ChatAppOptions
+            {
+                MaxGraphRepairAttempts = 1,
+                MaxContinuationBatches = 0,
+                AllowedTools = [new AllowedToolConfig { Prefix = "echo" }]
+            });
+            var service = CreateChatTurnService(provider, store, library, options, graphLibrary: graphLibrary);
+
+            var response = service.Handle("page-1", "echo good");
+
+            Assert.Equal("graph", response.Mode);
+            var promoted = Assert.Single(graphLibrary.All(), item => item.Key == "echo.value");
+            Assert.Equal("Echo a value", promoted.DisplayName);
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("PATH", originalPath);
+            Directory.Delete(toolDir, recursive: true);
+        }
+    }
+
+    [Fact]
     public void OutputReferenceResolver_Resolves_Json_Path_From_Upstream_Output()
     {
         var upstream = new Dictionary<string, string>(StringComparer.Ordinal)
