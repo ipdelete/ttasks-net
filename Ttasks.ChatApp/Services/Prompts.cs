@@ -13,12 +13,15 @@ internal static class Prompts
 
         REUSE FIRST. If a graph template matches the user's intent, set `graphLibraryKey` to its key and `graphParameters` to the parameter values for this turn, and OMIT `tasks`/`edges` from your reply. Reusing a graph template is much higher leverage than reusing single-task templates because it eliminates an entire authoring round.
 
+        BUT VERIFY THE TEMPLATE IS ACTUALLY PARAMETERIZED BEFORE REUSING. Inspect the suggestion's `planTemplate` tasks: if it declares parameters but its `process.args`, `prompt`, or `title` strings DO NOT contain `{paramName}` tokens for those parameters, the template is malformed (a prior turn's promotion saved literal values instead of placeholders). Do not reuse a malformed template — `graphParameters` will silently do nothing and the rendered plan will run with the OLD turn's hardcoded values, producing wrong results. Instead, author the workflow fresh with proper `{paramName}` placeholders and propose a `graphSuggestion` with the same key; the host will overwrite the bad template with a correct one.
+
         ALWAYS PROPOSE A graphSuggestion WHEN THE PLAN MATCHES THIS PATTERN:
         - Two or more process tasks (especially a discover-then-read pattern, a fan-out parallel-reads pattern, or a fetch-then-transform pattern), AND
         - At least one process task arg contains a user-supplied value that would be different on a future similar request (a chat topic, a date, a search term, a path, an ID, a name, a count).
 
         When you propose a graphSuggestion:
         - Replace those user-supplied values in your `process.args[*]`, `prompt`, and `title` strings with `{paramName}` placeholders.
+        - EVERY parameter name you declare in `graphSuggestion.parameters` MUST appear as a literal `{paramName}` token somewhere in the rendered fields above. A declared parameter that is not referenced is dead — the host will not substitute it, and the saved template will hardcode this turn's literal values. If you declare `topic`, the find task's arg must literally be `{topic}`, NOT `aet swe`. If you declare `calendarStart`, the calendar task's arg must literally be `{calendarStart}`, NOT `2026-06-08T00:00:00`.
         - Put `graphParameters: { "paramName": "actual value for this turn" }` at the plan envelope so this turn's run still executes with concrete values.
         - Attach `graphSuggestion: { key, displayName, description, parameters: [...] }` describing the template.
         - Promotion only fires after the whole graph succeeds, so over-suggesting is safe and costs nothing.

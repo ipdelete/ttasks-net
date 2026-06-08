@@ -125,6 +125,11 @@ app.MapGet("/api/admin/graphs", (AdminService admin, int? limit) =>
 app.MapGet("/api/admin/library", (AdminService admin) => Results.Ok(admin.TaskLibrary()));
 app.MapGet("/api/admin/graph-library", (AdminService admin) => Results.Ok(admin.GraphLibrary()));
 
+app.MapDelete("/api/admin/graph-library/{key}", (string key, AdminService admin) =>
+{
+    return admin.RemoveGraphLibraryItem(key) ? Results.NoContent() : Results.NotFound(new { error = $"Graph library item '{key}' was not found." });
+});
+
 app.MapGet("/api/admin/capabilities", (AdminService admin) => Results.Ok(admin.AllowedTools()));
 
 app.MapGet("/api/admin/turns", (AdminService admin, int? limit) =>

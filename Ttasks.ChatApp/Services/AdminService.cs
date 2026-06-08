@@ -99,6 +99,8 @@ public sealed class AdminService
                 item.Metadata))
             .ToList();
 
+    public bool RemoveGraphLibraryItem(string key) => _graphLibrary.Remove(key);
+
     public IReadOnlyList<AdminAllowedTool> AllowedTools() =>
         _options.AllowedTools
             .Where(tool => !string.IsNullOrWhiteSpace(tool.Prefix))

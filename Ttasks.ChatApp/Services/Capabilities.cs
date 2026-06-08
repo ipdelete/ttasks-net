@@ -376,6 +376,7 @@ public interface IGraphLibrary
 {
     GraphLibraryItem GetOrAdd(GraphLibraryDefinition definition);
     IReadOnlyList<GraphLibraryItem> All();
+    bool Remove(string key);
 }
 
 public sealed class StoreBackedGraphLibrary : IGraphLibrary
@@ -413,6 +414,16 @@ public sealed class StoreBackedGraphLibrary : IGraphLibrary
             .Select(ToItem)
             .OrderBy(item => item.Key, StringComparer.Ordinal)
             .ToList();
+
+    public bool Remove(string key)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(key);
+        var existing = All().FirstOrDefault(item => string.Equals(item.Key, key, StringComparison.Ordinal));
+        if (existing is null)
+            return false;
+        _store.Tasks.Delete(existing.Id);
+        return true;
+    }
 
     private GraphLibraryItem UpdateIfChanged(GraphLibraryItem existing, GraphLibraryDefinition definition)
     {
