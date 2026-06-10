@@ -17,6 +17,14 @@ public sealed record ChatTaskSummary(
     string? Error = null,
     string? BlockedBy = null);
 
+public sealed record PlannedTurnResult(
+    string Answer,
+    string SessionId,
+    string TurnId,
+    string? GraphId,
+    IReadOnlyList<ChatTaskSummary> Tasks,
+    bool Succeeded);
+
 public sealed record RouteDecision(
     string Mode,
     string? Answer,

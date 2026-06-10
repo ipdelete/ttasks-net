@@ -30,6 +30,7 @@ public sealed partial class GraphPlanValidator
                 throw new ArgumentException($"Invalid or duplicate task id '{task.Id}'.", nameof(plan));
 
             ValidateTask(task, capabilities, plan);
+            EnsureNoUnresolvedPlaceholders(task);
         }
 
         foreach (var edge in plan.Edges)
@@ -181,4 +182,33 @@ public sealed partial class GraphPlanValidator
 
     [GeneratedRegex("^[A-Za-z0-9_.:-]{1,64}$")]
     private static partial Regex TaskIdPattern();
+
+    // Matches an unresolved placeholder like {name} or {name:format}, but NOT
+    // task output references inside ${{ ... }} (their inner '{' is followed by
+    // whitespace, and their outer '{' is preceded by '$').
+    [GeneratedRegex(@"(?<!\$)\{(?![\{\s])([A-Za-z_][A-Za-z0-9_.\-]*)(?::[^}\n]*)?\}")]
+    private static partial Regex UnresolvedPlaceholderRegex();
+
+    private static void EnsureNoUnresolvedPlaceholders(GraphPlanTask task)
+    {
+        void Scan(string? value, string field)
+        {
+            if (string.IsNullOrEmpty(value)) return;
+            var match = UnresolvedPlaceholderRegex().Match(value);
+            if (match.Success)
+                throw new ArgumentException(
+                    $"Task '{task.Id}' has an unresolved placeholder '{match.Value}' in {field}. " +
+                    "Either supply a value for it via libraryParameters/graphParameters, replace the placeholder with a literal value, or reference an upstream output via ${{ tasks.<id>.output }}.");
+        }
+
+        Scan(task.Title, "title");
+        Scan(task.Description, "description");
+        Scan(task.Prompt, "prompt");
+        if (task.Process is { } process)
+        {
+            Scan(process.FileName, "process.fileName");
+            for (var i = 0; i < process.Args.Count; i++)
+                Scan(process.Args[i], $"process.args[{i}]");
+        }
+    }
 }

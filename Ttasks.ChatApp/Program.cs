@@ -23,6 +23,7 @@ builder.Services.AddSingleton<GraphPlanValidator>();
 builder.Services.AddSingleton<GraphPlanBuilder>();
 builder.Services.AddSingleton<ChatSessionRegistry>();
 builder.Services.AddSingleton<ChatTurnService>();
+builder.Services.AddSingleton<WriteTurnService>();
 builder.Services.AddSingleton<AdminService>();
 
 var app = builder.Build();
@@ -61,6 +62,7 @@ app.MapGet("/", () => Results.Content(
           <div class="sidebar-section">Workspace</div>
           <nav class="sidebar-nav">
             <a class="sidebar-link sidebar-link-active" href="/">Chat</a>
+            <a class="sidebar-link" href="/write">Write</a>
             <a class="sidebar-link" href="/admin">Dashboard</a>
             <a class="sidebar-link" href="/admin/turns">Turns</a>
             <a class="sidebar-link" href="/admin/capabilities">Capabilities</a>
@@ -152,6 +154,52 @@ app.MapGet("/admin/library", () => Results.Content(TaskLibraryPage(), "text/html
 app.MapGet("/admin/graph-library", () => Results.Content(GraphLibraryPage(), "text/html"));
 app.MapGet("/admin/turns", () => Results.Content(TurnsPage(), "text/html"));
 
+app.MapGet("/write", () => Results.Content(WritePage(), "text/html"));
+
+app.MapPost("/api/write", (WriteRequest request, WriteTurnService writer) =>
+{
+    if (request is null || string.IsNullOrWhiteSpace(request.Document))
+        return Results.BadRequest(new { error = "Document is required." });
+
+    try
+    {
+        var idx = request.Index <= 0 ? 1 : request.Index;
+        var total = request.Total <= 0 ? 1 : request.Total;
+        var kind = (request.Kind ?? "ai").Trim().ToLowerInvariant();
+
+        var response = kind switch
+        {
+            "ttasks" => writer.RunTtasks(request.SessionId, request.TurnId, idx, total, request.Document),
+            _ => writer.RunAi(request.SessionId, request.TurnId, idx, total, request.Document),
+        };
+
+        if (!response.Succeeded)
+        {
+            return Results.Problem(
+                detail: string.IsNullOrWhiteSpace(response.Reply) ? "Directive failed." : response.Reply,
+                statusCode: StatusCodes.Status500InternalServerError,
+                title: "Directive failed");
+        }
+
+        return Results.Ok(new
+        {
+            reply = response.Reply,
+            sessionId = response.SessionId,
+            turnId = response.TurnId,
+            graphId = response.GraphId,
+            taskCount = response.TaskCount
+        });
+    }
+    catch (OperationCanceledException)
+    {
+        return Results.StatusCode(StatusCodes.Status499ClientClosedRequest);
+    }
+    catch (Exception ex)
+    {
+        return Results.Problem(detail: ex.Message, statusCode: StatusCodes.Status500InternalServerError);
+    }
+});
+
 app.MapGet("/api/admin/graphs", (AdminService admin, int? limit) =>
 {
     var cappedLimit = Math.Clamp(limit ?? 50, 1, 200);
@@ -242,6 +290,7 @@ static string Sidebar(string active)
       <div class="sidebar-section">Workspace</div>
       <nav class="sidebar-nav">
         {{Link("/", "chat", "Chat")}}
+        {{Link("/write", "write", "Write")}}
         {{Link("/admin", "dashboard", "Dashboard")}}
         {{Link("/admin/turns", "turns", "Turns")}}
         {{Link("/admin/capabilities", "capabilities", "Capabilities")}}
@@ -253,7 +302,7 @@ static string Sidebar(string active)
     """;
 }
 
-static string AdminLayout(string title, string subtitle, string active, string body, string pageScript) =>
+static string AdminLayout(string title, string subtitle, string active, string body, string pageScript, string? topbarActions = null) =>
     $$"""
     <!doctype html>
     <html lang="en">
@@ -274,7 +323,7 @@ static string AdminLayout(string title, string subtitle, string active, string b
               <p>{{subtitle}}</p>
             </div>
             <div class="topbar-actions">
-              <button id="refresh" class="btn btn-primary" type="button">Refresh</button>
+              {{topbarActions ?? "<button id=\"refresh\" class=\"btn btn-primary\" type=\"button\">Refresh</button>"}}
             </div>
           </header>
           <main class="content">
@@ -744,3 +793,344 @@ static string GraphLibraryPage()
 
     return AdminLayout("Graph library", "Reusable multi-task workflow templates.", "graph-library", body, script);
 }
+
+
+static string WritePage()
+{
+    var body = """
+    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/dompurify/dist/purify.min.js"></script>
+    <div class="panel" style="height: calc(100vh - 56px - 2.5rem); min-height: 480px;">
+      <div class="panel-header">
+        <div>
+          <h2 class="panel-title">Document</h2>
+          <p class="panel-subtitle">Write prose. The assistant fills <code>```ai</code> blocks and <code>{{inline}}</code> directives in place. Saved locally to your browser.</p>
+        </div>
+        <div class="topbar-actions">
+          <span id="status" class="muted"></span>
+        </div>
+      </div>
+      <div class="panel-body" style="padding: 0; position: relative;">
+        <textarea id="editor" spellcheck="false"
+          style="width: 100%; height: 100%; padding: 1.25rem; border: 0; outline: 0; resize: none;
+                 font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: .9rem;
+                 line-height: 1.6; background: transparent; color: #0f172a; box-sizing: border-box;"
+          placeholder="Type markdown. Use ```ai blocks or {{inline}} directives to invite the assistant. Press Ctrl+Enter to Run."></textarea>
+        <div id="preview" class="markdown-body"
+          style="display: none; width: 100%; height: 100%; padding: 1.25rem;
+                 overflow: auto; box-sizing: border-box; background: #fff;"></div>
+      </div>
+    </div>
+    """;
+
+    var topbar = """
+    <span id="token-count" class="muted" style="margin-right: .5rem;">≈ 0 tokens</span>
+    <button class="btn btn-ghost" data-mode-btn="edit" type="button">Edit</button>
+    <button class="btn btn-ghost" data-mode-btn="preview" type="button">Preview</button>
+    <button id="run" class="btn btn-primary" type="button" title="Send document as a prompt (Ctrl+Enter)">Run</button>
+    """;
+
+    var script = """
+    const editor = document.getElementById('editor');
+    const preview = document.getElementById('preview');
+    const statusEl = document.getElementById('status');
+    const tokenEl = document.getElementById('token-count');
+    const runBtn = document.getElementById('run');
+    const STORAGE_KEY = 'ttasks.write.doc.v2';
+    const STARTER = [
+      '# Untitled',
+      '',
+      'Write prose here. Three directive forms invite the assistant in.',
+      '',
+      '```ai',
+      'Block directive: write the instruction here. This whole fenced block',
+      '(including the fences) is replaced by the assistant output on Run.',
+      '```',
+      '',
+      'Inline directive: write a sentence and ask {{for a snappier version}}.',
+      '',
+      '```ttasks',
+      'Planner directive: describe an intent that needs tools or a multi-step',
+      'graph. The planner builds a graph, runs it, and the final answer (with',
+      'a link to /admin/turns) replaces this block.',
+      '```',
+      '',
+      'An empty `{{}}` inline directive means "continue from here".',
+      '',
+      'Press Ctrl+Enter (or Cmd+Enter) to Run.',
+      ''
+    ].join('\n');
+    let mode = 'edit';
+    let busy = false;
+    let freshRanges = [];
+
+    // One-time migration of the old transcript-style doc to a backup key.
+    (function migrate() {
+      const oldKey = 'ttasks.write.doc';
+      if (!localStorage.getItem(STORAGE_KEY) && localStorage.getItem(oldKey)) {
+        try { localStorage.setItem('ttasks.write.doc.v1', localStorage.getItem(oldKey)); } catch (e) {}
+      }
+    })();
+
+    editor.value = localStorage.getItem(STORAGE_KEY) ?? STARTER;
+    updateTokens();
+    setMode('edit');
+    editor.selectionStart = editor.selectionEnd = editor.value.length;
+
+    editor.addEventListener('input', () => {
+      localStorage.setItem(STORAGE_KEY, editor.value);
+      updateTokens();
+      if (freshRanges.length) freshRanges = [];
+    });
+
+    function updateTokens() {
+      const t = Math.ceil((editor.value || '').length / 4);
+      tokenEl.textContent = `≈ ${t.toLocaleString()} tokens`;
+    }
+
+    // --- Directive parser ------------------------------------------------
+    // Returns ordered list of {kind:'block'|'inline', start, end, body}.
+    function parseDirectives(doc) {
+      const directives = [];
+      const codeRanges = [];
+
+      const fenceRe = /^([ \t]*)```([^\n`]*)\n([\s\S]*?)^\1```[ \t]*$/gm;
+      let m;
+      const errors = [];
+      while ((m = fenceRe.exec(doc)) !== null) {
+        const lang = (m[2] || '').trim().toLowerCase();
+        const start = m.index;
+        const end = m.index + m[0].length;
+        codeRanges.push([start, end]);
+        if (lang === 'ai') {
+          const body = m[3].trim();
+          if (!body) {
+            errors.push('Empty ```ai``` block — block directives need an instruction. Use {{}} for inline continuation.');
+            continue;
+          }
+          directives.push({ kind: 'ai', start, end, body });
+        } else if (lang === 'ttasks') {
+          const body = m[3].trim();
+          if (!body) {
+            errors.push('Empty ```ttasks``` block — needs an intent describing what the planner should do.');
+            continue;
+          }
+          directives.push({ kind: 'ttasks', start, end, body });
+        }
+      }
+
+      const inlineCodeRanges = [];
+      const inlineCodeRe = /`[^`\n]+`/g;
+      while ((m = inlineCodeRe.exec(doc)) !== null) {
+        inlineCodeRanges.push([m.index, m.index + m[0].length]);
+      }
+      function inAny(offset, ranges) {
+        for (const [s, e] of ranges) if (offset >= s && offset < e) return true;
+        return false;
+      }
+
+      const inlineRe = /\{\{([\s\S]*?)\}\}/g;
+      while ((m = inlineRe.exec(doc)) !== null) {
+        if (inAny(m.index, codeRanges) || inAny(m.index, inlineCodeRanges)) continue;
+        directives.push({
+          kind: 'inline',
+          start: m.index,
+          end: m.index + m[0].length,
+          body: m[1].trim(),
+        });
+      }
+
+      directives.sort((a, b) => a.start - b.start);
+      return { directives, errors };
+    }
+
+    function buildPrompt(doc, directive) {
+      const marker = '<<<HERE>>>';
+      const stitched = doc.slice(0, directive.start) + marker + doc.slice(directive.end);
+      const isContinue = directive.kind === 'inline' && (!directive.body || directive.body.length === 0);
+      const instruction = directive.body && directive.body.length > 0
+        ? directive.body
+        : 'Write the next sentence or short paragraph that naturally follows the text immediately before the placeholder, then STOP.';
+      const shape = directive.kind === 'ai'
+        ? 'The placeholder replaces a fenced code block. Produce a paragraph or section of prose (not code) unless the instruction asks otherwise. Do NOT wrap in code fences.'
+        : (isContinue
+            ? 'The placeholder is inline. Reply with ONE short paragraph at most. Do not add a second paragraph.'
+            : 'The placeholder is inline within a sentence or paragraph. Reply with a phrase, clause, or single sentence that fits inline. Do NOT produce multiple paragraphs or line breaks.');
+      return [
+        'You are filling a single placeholder marked <<<HERE>>> in a markdown document.',
+        'STRICT RULES:',
+        '  1. Return ONLY the replacement text that goes in place of <<<HERE>>>.',
+        '  2. Do NOT repeat or paraphrase any text that already appears before or after <<<HERE>>> in the document.',
+        '  3. Do NOT add headings, paragraphs, or sentences that extend beyond what the instruction asks for.',
+        '  4. No preamble ("Here is...", "Sure,..."), no closing remarks, no surrounding code fences.',
+        shape,
+        '',
+        'INSTRUCTION:',
+        instruction,
+        '',
+        'DOCUMENT (the placeholder is marked <<<HERE>>>):',
+        '---',
+        stitched,
+        '---'
+      ].join('\n');
+    }
+
+    function stripPreamble(text) {
+      return (text || '')
+        .replace(/^\s*(Sure|Certainly|Of course|Here(?:'s| is)(?: your| the)?[^\n:]*[:\n])\s*/i, '')
+        .trim();
+    }
+
+    // --- Run pipeline ----------------------------------------------------
+    async function run() {
+      if (busy) return;
+      const originalDoc = editor.value || '';
+      if (!originalDoc.trim()) { statusEl.textContent = 'Document is empty.'; return; }
+      const { directives, errors } = parseDirectives(originalDoc);
+      if (errors.length > 0) {
+        statusEl.textContent = errors[0];
+        return;
+      }
+      if (directives.length === 0) {
+        statusEl.textContent = 'No directive found. Add a ```ai instruction```, ```ttasks intent```, or {{inline}} prompt, then Run.';
+        return;
+      }
+
+      busy = true;
+      runBtn.disabled = true;
+      setMode('preview');
+      let doc = originalDoc;
+      let delta = 0;
+      freshRanges = [];
+      let runSessionId = null;
+      let runTurnId = null;
+
+      for (let i = 0; i < directives.length; i++) {
+        const d = directives[i];
+        const kindLabel = d.kind === 'ttasks' ? 'ttasks' : 'ai';
+        statusEl.textContent = `Running ${i + 1} of ${directives.length} (${kindLabel})…`;
+        try {
+          const shifted = { ...d, start: d.start + delta, end: d.end + delta };
+          const payload = d.kind === 'ttasks'
+            ? {
+                document: d.body,
+                kind: 'ttasks',
+                sessionId: runSessionId, turnId: runTurnId,
+                index: i + 1, total: directives.length
+              }
+            : {
+                document: buildPrompt(doc, shifted),
+                kind: 'ai',
+                sessionId: runSessionId, turnId: runTurnId,
+                index: i + 1, total: directives.length
+              };
+          const response = await fetch('/api/write', {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify(payload)
+          });
+          const text = await response.text();
+          const body = text ? JSON.parse(text) : {};
+          if (!response.ok) {
+            statusEl.textContent = `Directive ${i + 1} (${kindLabel}) failed: ${body.detail || body.error || 'HTTP ' + response.status}`;
+            busy = false; runBtn.disabled = false; return;
+          }
+          runSessionId = body.sessionId ?? runSessionId;
+          runTurnId = body.turnId ?? runTurnId;
+          const replacement = d.kind === 'ttasks'
+            ? (body.reply ?? '').trimEnd()
+            : stripPreamble(body.reply ?? '');
+          const insertStart = shifted.start;
+          const insertEnd = shifted.start + replacement.length;
+          doc = doc.slice(0, shifted.start) + replacement + doc.slice(shifted.end);
+          delta += replacement.length - (shifted.end - shifted.start);
+          freshRanges.push({ start: insertStart, end: insertEnd });
+          editor.value = doc;
+          localStorage.setItem(STORAGE_KEY, doc);
+          updateTokens();
+          renderPreview();
+        } catch (e) {
+          statusEl.textContent = `Directive ${i + 1} error: ${e.message}`;
+          busy = false; runBtn.disabled = false; return;
+        }
+      }
+
+      statusEl.textContent = `Done. Filled ${directives.length} directive${directives.length === 1 ? '' : 's'}.`;
+      busy = false;
+      runBtn.disabled = false;
+    }
+
+    // --- Preview ---------------------------------------------------------
+    function renderPreview() {
+      let src = editor.value || '';
+
+      // Wrap fresh ranges with <mark data-fresh> first (in doc coordinates).
+      // Splits across paragraph breaks so block-level content stays valid.
+      if (freshRanges.length) {
+        const sorted = [...freshRanges].sort((a, b) => b.start - a.start);
+        for (const r of sorted) {
+          const inner = src.slice(r.start, r.end);
+          const wrapped = inner.split(/(\n\n+)/).map(part => {
+            if (part === '' || /^\n\n+$/.test(part)) return part;
+            return `<mark data-fresh="1">${part}</mark>`;
+          }).join('');
+          src = src.slice(0, r.start) + wrapped + src.slice(r.end);
+        }
+      }
+
+      const blocks = [];
+      src = src.replace(/```[\s\S]*?```/g, m => { blocks.push(m); return `\u0000B${blocks.length - 1}\u0000`; });
+      const spans = [];
+      src = src.replace(/`[^`\n]+`/g, m => { spans.push(m); return `\u0000S${spans.length - 1}\u0000`; });
+      src = src.replace(/\{\{([\s\S]*?)\}\}/g, (_, b) => `<span class="directive-inline">{{${b}}}</span>`);
+      src = src.replace(/\u0000S(\d+)\u0000/g, (_, i) => spans[+i]);
+      src = src.replace(/\u0000B(\d+)\u0000/g, (_, i) => blocks[+i]);
+      const raw = marked.parse(src, { breaks: true, gfm: true });
+      preview.innerHTML = DOMPurify.sanitize(raw, { ADD_ATTR: ['data-fresh'] });
+      preview.querySelectorAll('pre > code.language-ai, pre > code.language-ttasks').forEach(code => {
+        const pre = code.parentElement;
+        pre.classList.add('directive-block');
+        pre.dataset.lang = code.classList.contains('language-ttasks') ? 'ttasks' : 'ai';
+      });
+      // Scroll first fresh insertion into view.
+      const firstFresh = preview.querySelector('mark[data-fresh]');
+      if (firstFresh) firstFresh.scrollIntoView({ block: 'center', behavior: 'smooth' });
+    }
+
+    function setMode(next) {
+      mode = next;
+      document.querySelectorAll('[data-mode-btn]').forEach(b => {
+        const active = b.dataset.modeBtn === mode;
+        b.classList.toggle('btn-primary', active);
+        b.classList.toggle('btn-ghost', !active);
+      });
+      if (mode === 'edit') {
+        editor.style.display = '';
+        preview.style.display = 'none';
+        editor.focus();
+      } else {
+        editor.style.display = 'none';
+        preview.style.display = '';
+        renderPreview();
+      }
+    }
+
+    document.querySelector('[data-mode-btn="edit"]').addEventListener('click', () => setMode('edit'));
+    document.querySelector('[data-mode-btn="preview"]').addEventListener('click', () => setMode('preview'));
+    runBtn.addEventListener('click', run);
+
+    document.addEventListener('keydown', e => {
+      if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') { e.preventDefault(); run(); }
+    });
+    """;
+
+    return AdminLayout(
+        "Write",
+        "Directive-driven markdown notebook. ```ai blocks and {{inline}} prompts are filled in place. No session memory.",
+        "write",
+        body,
+        script,
+        topbar);
+}
+
+internal sealed record WriteRequest(string Document, string? SessionId = null, string? TurnId = null, int Index = 1, int Total = 1, string? Kind = null);

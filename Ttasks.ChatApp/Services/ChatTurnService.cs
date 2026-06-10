@@ -76,6 +76,40 @@ public sealed class ChatTurnService
         return new ChatResponse("graph", turnState.Answer, activeSessionId, turnState.LastGraphId, turnState.Tasks);
     }
 
+    public PlannedTurnResult RunPlannedTurn(string? sessionId, string? turnId, string intent)
+    {
+        if (string.IsNullOrWhiteSpace(intent))
+            throw new ArgumentException("Intent is required.", nameof(intent));
+
+        var (activeSessionId, llmSession) = _sessions.GetOrCreate(sessionId);
+        var activeTurnId = string.IsNullOrWhiteSpace(turnId) ? Guid.NewGuid().ToString("N") : turnId!;
+
+        var capabilities = _capabilities.GetCapabilities(new CapabilityRequest(activeSessionId, intent));
+        if (capabilities.AllowedTools.Count == 0)
+        {
+            return new PlannedTurnResult(
+                Answer: capabilities.EmptyMessage,
+                SessionId: activeSessionId,
+                TurnId: activeTurnId,
+                GraphId: null,
+                Tasks: Array.Empty<ChatTaskSummary>(),
+                Succeeded: false);
+        }
+
+        var planningExecutor = CreatePromptExecutor(llmSession, includeUpstreamResults: false, _store);
+        var turnState = RunTurn(planningExecutor, llmSession, activeSessionId, activeTurnId, intent, intent, capabilities);
+        // Treat the turn as "ran" when at least one graph executed (even if some
+        // tasks failed). Planner-only failure leaves LastGraphId null.
+        var succeeded = turnState.LastGraphId is not null;
+        return new PlannedTurnResult(
+            turnState.Answer,
+            activeSessionId,
+            activeTurnId,
+            turnState.LastGraphId,
+            turnState.Tasks,
+            succeeded);
+    }
+
     private TurnState RunTurn(
         TaskExecutor planningExecutor,
         LlmAgentSession llmSession,
@@ -297,19 +331,34 @@ public sealed class ChatTurnService
 
     private GraphPlan ResolveGraphLibraryReference(GraphPlan plan)
     {
-        if (string.IsNullOrWhiteSpace(plan.GraphLibraryKey))
-            return plan;
-
-        var item = _graphLibrary.All().FirstOrDefault(candidate => string.Equals(candidate.Key, plan.GraphLibraryKey, StringComparison.Ordinal))
-            ?? throw new InvalidOperationException($"Plan references unknown graph library item '{plan.GraphLibraryKey}'.");
-
-        var rendered = RenderGraphTemplate(item, plan.GraphParameters);
-        return plan with
+        if (!string.IsNullOrWhiteSpace(plan.GraphLibraryKey))
         {
-            Graph = rendered.Graph,
-            Tasks = rendered.Tasks,
-            Edges = rendered.Edges
-        };
+            var item = _graphLibrary.All().FirstOrDefault(candidate => string.Equals(candidate.Key, plan.GraphLibraryKey, StringComparison.Ordinal))
+                ?? throw new InvalidOperationException($"Plan references unknown graph library item '{plan.GraphLibraryKey}'.");
+
+            var rendered = RenderGraphTemplate(item, plan.GraphParameters);
+            return plan with
+            {
+                Graph = rendered.Graph,
+                Tasks = rendered.Tasks,
+                Edges = rendered.Edges
+            };
+        }
+
+        // Authored plan: if the planner supplied graphParameters (typically
+        // alongside a graphSuggestion that declares them), substitute those
+        // values into the authored plan for THIS execution. The original
+        // authoredPlan keeps its placeholder tokens so promotion can save the
+        // template with placeholders intact.
+        if (plan.GraphParameters is { Count: > 0 } overrides)
+        {
+            var declared = (plan.GraphSuggestion?.Parameters as IReadOnlyList<TemplateParameter>)
+                ?? overrides.Keys.Select(k => new TemplateParameter(k, "user")).ToList();
+            var renderedTasks = plan.Tasks.Select(t => RenderPlanTask(t, declared, overrides)).ToList();
+            return plan with { Tasks = renderedTasks };
+        }
+
+        return plan;
     }
 
     private GraphPlan RenderGraphTemplate(GraphLibraryItem item, IReadOnlyDictionary<string, object?>? overrides)
