@@ -1065,15 +1065,20 @@ static string WritePage()
       let src = editor.value || '';
 
       // Wrap fresh ranges with <mark data-fresh> first (in doc coordinates).
-      // Splits across paragraph breaks so block-level content stays valid.
+      // Split per LINE and keep markdown block prefixes (#, >, -, *, +, 1.)
+      // OUTSIDE the <mark> so marked still recognizes headings, lists, and
+      // blockquotes inside fresh content.
       if (freshRanges.length) {
+        const blockPrefix = /^(\s*(?:#{1,6}\s+|>\s*|[-*+]\s+|\d+\.\s+))(.*)$/;
         const sorted = [...freshRanges].sort((a, b) => b.start - a.start);
         for (const r of sorted) {
           const inner = src.slice(r.start, r.end);
-          const wrapped = inner.split(/(\n\n+)/).map(part => {
-            if (part === '' || /^\n\n+$/.test(part)) return part;
-            return `<mark data-fresh="1">${part}</mark>`;
-          }).join('');
+          const wrapped = inner.split('\n').map(line => {
+            if (line === '' || /^\s*$/.test(line)) return line;
+            const m = line.match(blockPrefix);
+            if (m) return `${m[1]}<mark data-fresh="1">${m[2]}</mark>`;
+            return `<mark data-fresh="1">${line}</mark>`;
+          }).join('\n');
           src = src.slice(0, r.start) + wrapped + src.slice(r.end);
         }
       }
