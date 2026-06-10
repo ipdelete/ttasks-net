@@ -27,6 +27,9 @@ builder.Services.AddSingleton<AdminService>();
 
 var app = builder.Build();
 
+app.UseDefaultFiles();
+app.UseStaticFiles();
+
 using (var scope = app.Services.CreateScope())
 {
     var library = scope.ServiceProvider.GetRequiredService<ITaskLibrary>();
@@ -42,36 +45,69 @@ app.MapGet("/", () => Results.Content(
       <meta charset="utf-8" />
       <meta name="viewport" content="width=device-width, initial-scale=1" />
       <title>ttasks chat experiment</title>
-      <style>
-        body { font-family: system-ui, sans-serif; max-width: 900px; margin: 2rem auto; padding: 0 1rem; }
-        #log { display: grid; gap: .75rem; margin-bottom: 1rem; }
-        .msg { border: 1px solid #ddd; border-radius: .5rem; padding: .75rem; white-space: pre-wrap; }
-        .user { background: #f6f8fa; }
-        .assistant { background: #f0fff4; }
-        form { display: flex; gap: .5rem; }
-        input { flex: 1; padding: .75rem; }
-        button { padding: .75rem 1rem; }
-      </style>
+      <script src="https://cdn.tailwindcss.com"></script>
+      <link rel="stylesheet" href="/admin.css" />
     </head>
     <body>
-      <h1>ttasks chat experiment</h1>
-      <p>Plain questions are answered by one PROMPT task. Action requests are routed to a validated ttasks graph.</p>
-      <div id="log"></div>
-      <form id="form">
-        <input id="message" autocomplete="off" placeholder="Ask a question, or ask to read 48:notes and summarize..." />
-        <button>Send</button>
-      </form>
+      <div class="app-shell">
+        <aside class="sidebar">
+          <div class="sidebar-brand">
+            <div class="logo">tt</div>
+            <div>
+              <div class="name">ttasks</div>
+              <div class="tag">control plane</div>
+            </div>
+          </div>
+          <div class="sidebar-section">Workspace</div>
+          <nav class="sidebar-nav">
+            <a class="sidebar-link sidebar-link-active" href="/">Chat</a>
+            <a class="sidebar-link" href="/admin">Dashboard</a>
+            <a class="sidebar-link" href="/admin/turns">Turns</a>
+            <a class="sidebar-link" href="/admin/capabilities">Capabilities</a>
+            <a class="sidebar-link" href="/admin/library">Task library</a>
+            <a class="sidebar-link" href="/admin/graph-library">Graph library</a>
+          </nav>
+          <div class="sidebar-footer">ttasks-net &middot; experimental</div>
+        </aside>
+        <div class="app-main">
+          <header class="topbar">
+            <div class="topbar-title">
+              <h1>Chat</h1>
+              <p>Plain questions are answered directly. Action requests route through a validated ttasks graph.</p>
+            </div>
+            <div class="topbar-actions">
+              <button id="clear" class="btn btn-ghost" type="button">Clear</button>
+            </div>
+          </header>
+          <main class="content">
+            <div class="chat-shell">
+              <div id="log" class="chat-log"></div>
+              <form id="form" class="chat-form">
+                <input id="message" class="chat-input" autocomplete="off"
+                  placeholder="Ask a question, or ask to read 48:notes and summarize..." />
+                <button class="btn btn-primary" type="submit">Send</button>
+              </form>
+            </div>
+          </main>
+        </div>
+      </div>
+      <script src="/admin.js"></script>
       <script>
         const log = document.getElementById('log');
         const form = document.getElementById('form');
         const input = document.getElementById('message');
         const sessionId = crypto.randomUUID();
+
         function add(role, text) {
           const div = document.createElement('div');
-          div.className = `msg ${role}`;
-          div.textContent = `${role}: ${text}`;
+          div.className = `chat-msg ${role}`;
+          div.innerHTML = `<div class="role">${role}</div>` + tt.escapeHtml(text);
           log.appendChild(div);
+          div.scrollIntoView({ behavior: 'smooth', block: 'end' });
         }
+
+        document.getElementById('clear').addEventListener('click', () => { log.innerHTML = ''; });
+
         form.addEventListener('submit', async event => {
           event.preventDefault();
           const message = input.value.trim();
@@ -186,720 +222,525 @@ static string ResolvePath(string configuredPath, string contentRootPath)
         : Path.GetFullPath(configuredPath, contentRootPath);
 }
 
-static string AdminPage() =>
-    """
+static string Sidebar(string active)
+{
+    string Link(string href, string key, string label)
+    {
+        var cls = key == active ? "sidebar-link sidebar-link-active" : "sidebar-link";
+        return $$"""<a class="{{cls}}" href="{{href}}">{{label}}</a>""";
+    }
+
+    return $$"""
+    <aside class="sidebar">
+      <div class="sidebar-brand">
+        <div class="logo">tt</div>
+        <div>
+          <div class="name">ttasks</div>
+          <div class="tag">control plane</div>
+        </div>
+      </div>
+      <div class="sidebar-section">Workspace</div>
+      <nav class="sidebar-nav">
+        {{Link("/", "chat", "Chat")}}
+        {{Link("/admin", "dashboard", "Dashboard")}}
+        {{Link("/admin/turns", "turns", "Turns")}}
+        {{Link("/admin/capabilities", "capabilities", "Capabilities")}}
+        {{Link("/admin/library", "library", "Task library")}}
+        {{Link("/admin/graph-library", "graph-library", "Graph library")}}
+      </nav>
+      <div class="sidebar-footer">ttasks-net &middot; experimental</div>
+    </aside>
+    """;
+}
+
+static string AdminLayout(string title, string subtitle, string active, string body, string pageScript) =>
+    $$"""
     <!doctype html>
     <html lang="en">
     <head>
       <meta charset="utf-8" />
       <meta name="viewport" content="width=device-width, initial-scale=1" />
-      <title>ttasks admin</title>
-      <style>
-        :root { color-scheme: light dark; --border: #d0d7de; --muted: #57606a; --bg: #f6f8fa; --code-bg: #f6f8fa; --code-fg: #24292f; }
-        @media (prefers-color-scheme: dark) {
-          :root { --border: #8b949e; --muted: #8b949e; --bg: #161b22; --code-bg: #161b22; --code-fg: #e6edf3; }
-        }
-        body { font-family: system-ui, sans-serif; margin: 0; }
-        header { border-bottom: 1px solid var(--border); padding: 1rem; display: flex; justify-content: space-between; align-items: center; }
-        nav { display: flex; gap: .75rem; margin-top: .5rem; }
-        nav a { color: inherit; }
-        main { display: grid; grid-template-columns: 320px minmax(360px, 1fr) 420px; min-height: calc(100vh - 65px); }
-        section { border-right: 1px solid var(--border); padding: 1rem; overflow: auto; }
-        section:last-child { border-right: 0; }
-        h1, h2, h3 { margin: 0 0 .75rem; }
-        button { border: 1px solid var(--border); border-radius: .4rem; background: canvas; padding: .4rem .6rem; cursor: pointer; }
-        .list { display: grid; gap: .5rem; }
-        .card { border: 1px solid var(--border); border-radius: .5rem; padding: .7rem; background: canvas; cursor: pointer; }
-        .card:hover, .card.selected { outline: 2px solid #0969da; }
-        .muted { color: var(--muted); font-size: .85rem; }
-        .row { display: flex; gap: .5rem; align-items: center; justify-content: space-between; }
-        .badge { border-radius: 999px; padding: .15rem .45rem; font-size: .75rem; font-weight: 700; }
-        .Succeeded { background: #dafbe1; color: #116329; }
-        .Failed, .Cancelled, .Blocked { background: #ffebe9; color: #82071e; }
-        .Running { background: #fff8c5; color: #7d4e00; }
-        .Pending, .Empty { background: var(--bg); color: var(--muted); }
-        .graph { display: grid; gap: .7rem; }
-        .node { border: 1px solid var(--border); border-left-width: .45rem; border-radius: .5rem; padding: .65rem; cursor: pointer; }
-        .node.Succeeded { border-left-color: #2da44e; background: canvas; color: inherit; }
-        .node.Failed, .node.Cancelled, .node.Blocked { border-left-color: #cf222e; background: canvas; color: inherit; }
-        .node.Pending, .node.Running { border-left-color: #bf8700; background: canvas; color: inherit; }
-        .edge { margin: -.25rem 0 -.15rem 1.25rem; color: var(--muted); font-family: ui-monospace, SFMono-Regular, Consolas, monospace; }
-        pre { white-space: pre-wrap; overflow-wrap: anywhere; background: var(--code-bg); color: var(--code-fg); padding: .75rem; border-radius: .5rem; max-height: 45vh; overflow: auto; }
-        dl { display: grid; grid-template-columns: 7rem 1fr; gap: .35rem .75rem; }
-        dt { color: var(--muted); }
-        dd { margin: 0; overflow-wrap: anywhere; }
-      </style>
+      <title>ttasks · {{title}}</title>
+      <script src="https://cdn.tailwindcss.com"></script>
+      <link rel="stylesheet" href="/admin.css" />
     </head>
     <body>
-      <header>
-        <div>
-          <h1>ttasks admin</h1>
-          <div class="muted">Persisted graph and task runs</div>
-          <nav>
-            <strong>Graphs and tasks</strong>
-            <a href="/admin/turns">Turns</a>
-            <a href="/admin/capabilities">Capabilities</a>
-            <a href="/admin/library">Task library</a>
-            <a href="/admin/graph-library">Graph library</a>
-          </nav>
+      <div class="app-shell">
+        {{Sidebar(active)}}
+        <div class="app-main">
+          <header class="topbar">
+            <div class="topbar-title">
+              <h1>{{title}}</h1>
+              <p>{{subtitle}}</p>
+            </div>
+            <div class="topbar-actions">
+              <button id="refresh" class="btn btn-primary" type="button">Refresh</button>
+            </div>
+          </header>
+          <main class="content">
+            {{body}}
+          </main>
         </div>
-        <button id="refresh">Refresh</button>
-      </header>
-      <main>
-        <section>
-          <h2>Graphs</h2>
-          <div id="graphs" class="list"></div>
-        </section>
-        <section>
-          <h2 id="graph-title">Graph detail</h2>
-          <div id="graph-meta" class="muted"></div>
-          <div id="graph" class="graph"></div>
-        </section>
-        <section>
-          <h2>Task inspector</h2>
-          <div id="task">Select a task.</div>
-        </section>
-      </main>
+      </div>
+      <script src="/admin.js"></script>
       <script>
-        const graphsEl = document.getElementById('graphs');
-        const graphEl = document.getElementById('graph');
-        const graphTitleEl = document.getElementById('graph-title');
-        const graphMetaEl = document.getElementById('graph-meta');
-        const taskEl = document.getElementById('task');
-        let selectedGraphId = null;
-        let selectedTaskId = null;
-
-        document.getElementById('refresh').addEventListener('click', loadGraphs);
-
-        function badge(status) {
-          return `<span class="badge ${status}">${status}</span>`;
-        }
-
-        function labelTask(task) {
-          return task.title || `${task.type} ${task.id.slice(0, 8)}`;
-        }
-
-        function fmtTime(value) {
-          return new Date(value).toLocaleString();
-        }
-
-        async function loadGraphs() {
-          graphsEl.textContent = 'Loading...';
-          const graphs = await fetch('/api/admin/graphs?limit=100').then(r => r.json());
-          graphsEl.innerHTML = '';
-          if (graphs.length === 0) {
-            graphsEl.textContent = 'No graphs persisted yet.';
-            return;
-          }
-          for (const graph of graphs) {
-            const card = document.createElement('div');
-            card.className = `card ${graph.id === selectedGraphId ? 'selected' : ''}`;
-            card.innerHTML = `
-              <div class="row"><strong>${escapeHtml(graph.title || graph.id)}</strong>${badge(graph.status)}</div>
-              <div class="muted">${fmtTime(graph.createdAt)}</div>
-              <div class="muted">${graph.taskCount} tasks: ${graph.succeeded} ok, ${graph.failed + graph.cancelled + graph.blocked} bad</div>`;
-            card.addEventListener('click', () => loadGraph(graph.id));
-            graphsEl.appendChild(card);
-          }
-          if (!selectedGraphId) {
-            await loadGraph(graphs[0].id);
-          }
-        }
-
-        async function loadGraph(id) {
-          selectedGraphId = id;
-          selectedTaskId = null;
-          const graph = await fetch(`/api/admin/graphs/${encodeURIComponent(id)}`).then(r => r.json());
-          graphTitleEl.textContent = graph.title || graph.id;
-          graphMetaEl.textContent = `${graph.id} - ${fmtTime(graph.createdAt)} - ${graph.status}`;
-          renderGraph(graph);
-          taskEl.textContent = 'Select a task.';
-          await loadGraphsListOnly();
-        }
-
-        async function loadGraphsListOnly() {
-          const graphs = await fetch('/api/admin/graphs?limit=100').then(r => r.json());
-          for (const [i, card] of [...graphsEl.children].entries()) {
-            card.classList.toggle('selected', graphs[i]?.id === selectedGraphId);
-          }
-        }
-
-        function renderGraph(graph) {
-          graphEl.innerHTML = '';
-          const incoming = new Map(graph.tasks.map(task => [task.id, []]));
-          for (const edge of graph.edges) incoming.get(edge.to)?.push(edge.from);
-          const taskById = new Map(graph.tasks.map(task => [task.id, task]));
-
-          for (const task of graph.tasks) {
-            const parents = incoming.get(task.id) || [];
-            if (parents.length > 0) {
-              const edge = document.createElement('div');
-              edge.className = 'edge';
-              edge.textContent = `depends on ${parents.map(id => labelTask(taskById.get(id))).join(', ')}`;
-              graphEl.appendChild(edge);
-            }
-            const node = document.createElement('div');
-            node.className = `node ${task.status} ${task.id === selectedTaskId ? 'selected' : ''}`;
-            node.innerHTML = `
-              <div class="row"><strong>${escapeHtml(labelTask(task))}</strong>${badge(task.status)}</div>
-              <div class="muted">${task.type} - ${task.id}</div>
-              ${task.error ? `<div class="muted">error: ${escapeHtml(task.error)}</div>` : ''}`;
-            node.addEventListener('click', () => loadTask(task.id));
-            graphEl.appendChild(node);
-          }
-        }
-
-        async function loadTask(id) {
-          selectedTaskId = id;
-          const task = await fetch(`/api/admin/tasks/${encodeURIComponent(id)}`).then(r => r.json());
-          taskEl.innerHTML = `
-            <h3>${escapeHtml(task.title || task.id)}</h3>
-            <dl>
-              <dt>id</dt><dd>${escapeHtml(task.id)}</dd>
-              <dt>type</dt><dd>${escapeHtml(task.type)}</dd>
-              <dt>status</dt><dd>${badge(task.status)}</dd>
-              <dt>created</dt><dd>${fmtTime(task.createdAt)}</dd>
-              <dt>timeout</dt><dd>${task.timeout ?? ''}</dd>
-              <dt>blocked by</dt><dd>${escapeHtml(task.blockedBy || '')}</dd>
-              <dt>error</dt><dd>${escapeHtml(task.error || task.result?.error || '')}</dd>
-            </dl>
-            <h3>Metadata</h3>
-            <pre>${escapeHtml(JSON.stringify(task.metadata || {}, null, 2))}</pre>
-            <h3>Payload</h3>
-            <pre>${escapeHtml(task.payload)}</pre>
-            <h3>Output</h3>
-            <pre>${escapeHtml(task.result?.output || '')}</pre>`;
-        }
-
-        function escapeHtml(value) {
-          return String(value ?? '').replace(/[&<>"']/g, ch => ({
-            '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
-          }[ch]));
-        }
-
-        loadGraphs();
+      {{pageScript}}
       </script>
     </body>
     </html>
     """;
 
-static string CapabilitiesPage() =>
-    """
-    <!doctype html>
-    <html lang="en">
-    <head>
-      <meta charset="utf-8" />
-      <meta name="viewport" content="width=device-width, initial-scale=1" />
-      <title>ttasks capabilities</title>
-      <style>
-        :root { color-scheme: light dark; --border: #d0d7de; --muted: #57606a; --bg: #f6f8fa; --code-bg: #f6f8fa; --code-fg: #24292f; }
-        @media (prefers-color-scheme: dark) {
-          :root { --border: #8b949e; --muted: #8b949e; --bg: #161b22; --code-bg: #161b22; --code-fg: #e6edf3; }
-        }
-        body { font-family: system-ui, sans-serif; margin: 0; }
-        header { border-bottom: 1px solid var(--border); padding: 1rem; display: flex; justify-content: space-between; align-items: center; }
-        nav { display: flex; gap: .75rem; margin-top: .5rem; }
-        nav a { color: inherit; }
-        main { padding: 1rem; }
-        h1, h2, h3 { margin: 0 0 .75rem; }
-        button { border: 1px solid var(--border); border-radius: .4rem; background: canvas; padding: .4rem .6rem; cursor: pointer; }
-        .list { display: grid; gap: .75rem; max-width: 1100px; }
-        .card { border: 1px solid var(--border); border-radius: .5rem; padding: .8rem; background: canvas; }
-        .muted { color: var(--muted); font-size: .85rem; }
-        .row { display: flex; gap: .5rem; align-items: center; justify-content: space-between; }
-        .badge { border-radius: 999px; padding: .15rem .45rem; font-size: .75rem; font-weight: 700; background: var(--bg); color: var(--muted); }
-        code { background: var(--code-bg); color: var(--code-fg); border-radius: .25rem; padding: .1rem .25rem; }
-        ul { margin-bottom: 0; }
-      </style>
-    </head>
-    <body>
-      <header>
-        <div>
-          <h1>ttasks capabilities</h1>
-          <div class="muted">Host-approved actions the chat planner can use</div>
-          <nav>
-            <a href="/admin">Graphs and tasks</a>
-            <a href="/admin/turns">Turns</a>
-            <strong>Capabilities</strong>
-            <a href="/admin/library">Task library</a>
-            <a href="/admin/graph-library">Graph library</a>
-          </nav>
-        </div>
-        <button id="refresh">Refresh</button>
-      </header>
-      <main>
-        <div id="capabilities" class="list">Loading...</div>
-      </main>
-      <script>
-        const capabilitiesEl = document.getElementById('capabilities');
-        document.getElementById('refresh').addEventListener('click', loadCapabilities);
-
-        async function loadCapabilities() {
-          capabilitiesEl.textContent = 'Loading...';
-          const capabilities = await fetch('/api/admin/capabilities').then(r => r.json());
-          capabilitiesEl.innerHTML = '';
-          if (capabilities.length === 0) {
-            capabilitiesEl.textContent = 'No capabilities registered.';
-            return;
-          }
-          for (const capability of capabilities) {
-            const card = document.createElement('div');
-            card.className = 'card';
-            card.innerHTML = `
-              <div class="row"><h2><code>${escapeHtml(capability.prefix)}</code></h2></div>
-              <p>${escapeHtml(capability.description || '(no description)')}</p>
-              ${capability.helpCommand ? `<p><strong>Help:</strong> <code>${escapeHtml(capability.helpCommand)}</code></p>` : ''}`;
-            capabilitiesEl.appendChild(card);
-          }
-        }
-
-        function escapeHtml(value) {
-          return String(value ?? '').replace(/[&<>"']/g, ch => ({
-            '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
-          }[ch]));
-        }
-
-        loadCapabilities();
-      </script>
-    </body>
-    </html>
+static string AdminPage()
+{
+    var body = """
+    <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 mb-5">
+      <div class="card"><div class="row"><div><div class="kpi-label">Total graphs</div><div id="kpi-total" class="kpi-value">—</div><div class="kpi-sub">persisted in store</div></div><div class="kpi-accent kpi-accent-indigo">G</div></div></div>
+      <div class="card"><div class="row"><div><div class="kpi-label">Succeeded</div><div id="kpi-ok" class="kpi-value">—</div><div class="kpi-sub">all tasks ok</div></div><div class="kpi-accent kpi-accent-emerald">✓</div></div></div>
+      <div class="card"><div class="row"><div><div class="kpi-label">Failed / cancelled</div><div id="kpi-fail" class="kpi-value">—</div><div class="kpi-sub">needs attention</div></div><div class="kpi-accent kpi-accent-rose">!</div></div></div>
+      <div class="card"><div class="row"><div><div class="kpi-label">Running / pending</div><div id="kpi-run" class="kpi-value">—</div><div class="kpi-sub">in flight</div></div><div class="kpi-accent kpi-accent-amber">↻</div></div></div>
+    </div>
+    <div class="grid gap-4" style="grid-template-columns: 280px 320px minmax(480px, 1fr);">
+      <div class="panel" style="max-height: calc(100vh - 56px - 2.5rem - 130px); min-height: 480px;">
+        <div class="panel-header"><h2 class="panel-title">Recent graphs</h2><span id="graphs-count" class="muted"></span></div>
+        <div class="panel-body"><div id="graphs" class="flex flex-col gap-2"></div></div>
+      </div>
+      <div class="panel" style="max-height: calc(100vh - 56px - 2.5rem - 130px); min-height: 480px;">
+        <div class="panel-header"><div><h2 class="panel-title" id="graph-title">Graph detail</h2><p class="panel-subtitle" id="graph-meta">Select a graph from the list.</p></div></div>
+        <div class="panel-body"><div id="graph"></div></div>
+      </div>
+      <div class="panel" style="max-height: calc(100vh - 56px - 2.5rem - 130px); min-height: 480px;">
+        <div class="panel-header"><h2 class="panel-title">Task inspector</h2></div>
+        <div class="panel-body"><div id="task" class="muted">Select a task to inspect.</div></div>
+      </div>
+    </div>
     """;
 
-static string TaskLibraryPage() =>
-    """
-    <!doctype html>
-    <html lang="en">
-    <head>
-      <meta charset="utf-8" />
-      <meta name="viewport" content="width=device-width, initial-scale=1" />
-      <title>ttasks task library</title>
-      <style>
-        :root { color-scheme: light dark; --border: #d0d7de; --muted: #57606a; --bg: #f6f8fa; --code-bg: #f6f8fa; --code-fg: #24292f; }
-        @media (prefers-color-scheme: dark) {
-          :root { --border: #8b949e; --muted: #8b949e; --bg: #161b22; --code-bg: #161b22; --code-fg: #e6edf3; }
-        }
-        body { font-family: system-ui, sans-serif; margin: 0; }
-        header { border-bottom: 1px solid var(--border); padding: 1rem; display: flex; justify-content: space-between; align-items: center; }
-        nav { display: flex; gap: .75rem; margin-top: .5rem; }
-        nav a { color: inherit; }
-        main { display: grid; grid-template-columns: 360px minmax(360px, 1fr); min-height: calc(100vh - 65px); }
-        section { border-right: 1px solid var(--border); padding: 1rem; overflow: auto; }
-        section:last-child { border-right: 0; }
-        h1, h2, h3 { margin: 0 0 .75rem; }
-        button { border: 1px solid var(--border); border-radius: .4rem; background: canvas; padding: .4rem .6rem; cursor: pointer; }
-        .list { display: grid; gap: .5rem; }
-        .card { border: 1px solid var(--border); border-radius: .5rem; padding: .7rem; background: canvas; cursor: pointer; }
-        .card:hover, .card.selected { outline: 2px solid #0969da; }
-        .muted { color: var(--muted); font-size: .85rem; }
-        .row { display: flex; gap: .5rem; align-items: center; justify-content: space-between; }
-        .badge { border-radius: 999px; padding: .15rem .45rem; font-size: .75rem; font-weight: 700; background: var(--bg); color: var(--muted); }
-        pre { white-space: pre-wrap; overflow-wrap: anywhere; background: var(--code-bg); color: var(--code-fg); padding: .75rem; border-radius: .5rem; max-height: 45vh; overflow: auto; }
-        dl { display: grid; grid-template-columns: 8rem 1fr; gap: .35rem .75rem; }
-        dt { color: var(--muted); }
-        dd { margin: 0; overflow-wrap: anywhere; }
-      </style>
-    </head>
-    <body>
-      <header>
-        <div>
-          <h1>ttasks task library</h1>
-          <div class="muted">Saved reusable capability task templates</div>
-          <nav>
-            <a href="/admin">Graphs and tasks</a>
-            <a href="/admin/turns">Turns</a>
-            <a href="/admin/capabilities">Capabilities</a>
-            <strong>Task library</strong>
-          </nav>
-        </div>
-        <button id="refresh">Refresh</button>
-      </header>
-      <main>
-        <section>
-          <h2>Library items</h2>
-          <div id="library" class="list">Loading...</div>
-        </section>
-        <section>
-          <h2>Library item detail</h2>
-          <div id="detail">Select a library item.</div>
-        </section>
-      </main>
-      <script>
-        const libraryEl = document.getElementById('library');
-        const detailEl = document.getElementById('detail');
-        let items = [];
-        let selectedKey = null;
-        document.getElementById('refresh').addEventListener('click', loadLibrary);
+    var script = """
+    const graphsEl = document.getElementById('graphs');
+    const graphEl = document.getElementById('graph');
+    const graphTitleEl = document.getElementById('graph-title');
+    const graphMetaEl = document.getElementById('graph-meta');
+    const graphsCountEl = document.getElementById('graphs-count');
+    const taskEl = document.getElementById('task');
+    const kpi = {
+      total: document.getElementById('kpi-total'),
+      ok: document.getElementById('kpi-ok'),
+      fail: document.getElementById('kpi-fail'),
+      run: document.getElementById('kpi-run'),
+    };
+    let selectedGraphId = null;
 
-        async function loadLibrary() {
-          libraryEl.textContent = 'Loading...';
-          items = await fetch('/api/admin/library').then(r => r.json());
-          libraryEl.innerHTML = '';
-          if (items.length === 0) {
-            libraryEl.textContent = 'No reusable tasks yet.';
-            detailEl.textContent = 'No library items are available.';
-            return;
-          }
-          for (const item of items) {
-            const card = document.createElement('div');
-            card.className = `card ${item.key === selectedKey ? 'selected' : ''}`;
-            card.innerHTML = `
-              <div class="row"><strong>${escapeHtml(item.displayName || item.key)}</strong></div>
-              <div class="muted">${escapeHtml(item.key)}</div>
-              <div class="muted">${fmtTime(item.createdAt)}</div>`;
-            card.addEventListener('click', () => selectItem(item.key));
-            libraryEl.appendChild(card);
-          }
-          if (!selectedKey) {
-            selectItem(items[0].key);
-          }
-        }
+    document.getElementById('refresh').addEventListener('click', loadGraphs);
 
-        function selectItem(key) {
-          selectedKey = key;
-          const item = items.find(candidate => candidate.key === key);
-          if (!item) return;
-          for (const card of libraryEl.children) {
-            card.classList.toggle('selected', card.querySelector('.muted')?.textContent === key);
-          }
-          detailEl.innerHTML = `
-            <h3>${escapeHtml(item.displayName || item.key)}</h3>
-            <dl>
-              <dt>id</dt><dd>${escapeHtml(item.id)}</dd>
-              <dt>key</dt><dd>${escapeHtml(item.key)}</dd>
-              <dt>fileName</dt><dd><code>${escapeHtml(item.fileName)}</code></dd>
-              <dt>created</dt><dd>${fmtTime(item.createdAt)}</dd>
-              <dt>description</dt><dd>${escapeHtml(item.description)}</dd>
-            </dl>
-            <h3>Args template</h3>
-            <pre>${escapeHtml(JSON.stringify(item.argsTemplate || [], null, 2))}</pre>
-            <h3>Metadata</h3>
-            <pre>${escapeHtml(JSON.stringify(item.metadata || {}, null, 2))}</pre>`;
-        }
+    function labelTask(task) { return task.title || `${task.type} ${tt.shortId(task.id)}`; }
 
-        function fmtTime(value) {
-          return new Date(value).toLocaleString();
-        }
+    function updateKpis(graphs) {
+      kpi.total.textContent = graphs.length;
+      kpi.ok.textContent = graphs.filter(g => g.status === 'Succeeded').length;
+      kpi.fail.textContent = graphs.filter(g => ['Failed','Cancelled','Blocked'].includes(g.status)).length;
+      kpi.run.textContent = graphs.filter(g => ['Running','Pending'].includes(g.status)).length;
+    }
 
-        function escapeHtml(value) {
-          return String(value ?? '').replace(/[&<>"']/g, ch => ({
-            '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
-          }[ch]));
-        }
+    function highlightGraphs() {
+      for (const card of graphsEl.children) {
+        if (!card.dataset || !card.dataset.graphId) continue;
+        card.classList.toggle('card-selected', card.dataset.graphId === selectedGraphId);
+      }
+    }
 
-        loadLibrary();
-      </script>
-    </body>
-    </html>
+    async function loadGraphs() {
+      graphsEl.innerHTML = '<div class="muted">Loading…</div>';
+      const graphs = await fetch('/api/admin/graphs?limit=100').then(r => r.json());
+      updateKpis(graphs);
+      graphsCountEl.textContent = graphs.length ? `${graphs.length} total` : '';
+      graphsEl.innerHTML = '';
+      if (graphs.length === 0) {
+        graphsEl.innerHTML = '<div class="muted">No graphs persisted yet.</div>';
+        return;
+      }
+      for (const graph of graphs) {
+        const card = document.createElement('div');
+        card.className = 'card card-hover';
+        card.dataset.graphId = graph.id;
+        const bad = graph.failed + graph.cancelled + graph.blocked;
+        card.innerHTML = `
+          <div class="row"><strong>${tt.escapeHtml(graph.title || tt.shortId(graph.id, 12))}</strong>${tt.pill(graph.status)}</div>
+          <div class="muted mt-1">${tt.fmtTime(graph.createdAt)}</div>
+          <div class="muted">${graph.taskCount} tasks · ${graph.succeeded} ok · ${bad} bad</div>`;
+        card.addEventListener('click', () => loadGraph(graph.id));
+        graphsEl.appendChild(card);
+      }
+      if (!selectedGraphId) await loadGraph(graphs[0].id);
+      else highlightGraphs();
+    }
+
+    async function loadGraph(id) {
+      selectedGraphId = id;
+      highlightGraphs();
+      const graph = await fetch(`/api/admin/graphs/${encodeURIComponent(id)}`).then(r => r.json());
+      graphTitleEl.textContent = graph.title || graph.id;
+      graphMetaEl.textContent = `${graph.id} · ${tt.fmtTime(graph.createdAt)} · ${graph.status}`;
+      renderGraph(graph);
+      taskEl.innerHTML = '<div class="muted">Select a task to inspect.</div>';
+    }
+
+    function renderGraph(graph) {
+      graphEl.innerHTML = '';
+      const incoming = new Map(graph.tasks.map(t => [t.id, []]));
+      for (const e of graph.edges) incoming.get(e.to)?.push(e.from);
+      const taskById = new Map(graph.tasks.map(t => [t.id, t]));
+      for (const task of graph.tasks) {
+        const parents = incoming.get(task.id) || [];
+        if (parents.length > 0) {
+          const edge = document.createElement('div');
+          edge.className = 'edge';
+          edge.textContent = `depends on ${parents.map(id => labelTask(taskById.get(id))).join(', ')}`;
+          graphEl.appendChild(edge);
+        }
+        const node = document.createElement('div');
+        node.className = `node ${task.status}`;
+        node.innerHTML = `
+          <div class="row"><strong>${tt.escapeHtml(labelTask(task))}</strong>${tt.pill(task.status)}</div>
+          <div class="muted">${tt.escapeHtml(task.type)} · <code class="inline">${tt.escapeHtml(tt.shortId(task.id, 12))}</code></div>
+          ${task.error ? `<div class="muted">error: ${tt.escapeHtml(task.error)}</div>` : ''}`;
+        node.addEventListener('click', () => loadTask(task.id));
+        graphEl.appendChild(node);
+      }
+    }
+
+    async function loadTask(id) {
+      const task = await fetch(`/api/admin/tasks/${encodeURIComponent(id)}`).then(r => r.json());
+      taskEl.innerHTML = `
+        <div class="row mb-2"><strong>${tt.escapeHtml(task.title || task.id)}</strong>${tt.pill(task.status)}</div>
+        <dl class="props">
+          <dt>id</dt><dd><code class="inline">${tt.escapeHtml(task.id)}</code></dd>
+          <dt>type</dt><dd>${tt.escapeHtml(task.type)}</dd>
+          <dt>created</dt><dd>${tt.fmtTime(task.createdAt)}</dd>
+          <dt>timeout</dt><dd>${task.timeout ?? '—'}</dd>
+          <dt>blocked by</dt><dd>${tt.escapeHtml(task.blockedBy || '—')}</dd>
+          <dt>error</dt><dd>${tt.escapeHtml(task.error || task.result?.error || '—')}</dd>
+        </dl>
+        <div class="detail-section-title">Metadata</div>
+        <pre class="code">${tt.escapeHtml(JSON.stringify(task.metadata || {}, null, 2))}</pre>
+        <div class="detail-section-title">Payload</div>
+        <pre class="code">${tt.escapeHtml(task.payload)}</pre>
+        <div class="detail-section-title">Output</div>
+        <pre class="code">${tt.escapeHtml(task.result?.output || '')}</pre>`;
+    }
+
+    loadGraphs();
     """;
 
-static string TurnsPage() =>
-    """
-    <!doctype html>
-    <html lang="en">
-    <head>
-      <meta charset="utf-8" />
-      <meta name="viewport" content="width=device-width, initial-scale=1" />
-      <title>ttasks turns</title>
-      <style>
-        :root { color-scheme: light dark; --border: #d0d7de; --muted: #57606a; --bg: #f6f8fa; --code-bg: #f6f8fa; --code-fg: #24292f; }
-        @media (prefers-color-scheme: dark) {
-          :root { --border: #8b949e; --muted: #8b949e; --bg: #161b22; --code-bg: #161b22; --code-fg: #e6edf3; }
-        }
-        body { font-family: system-ui, sans-serif; margin: 0; }
-        header { border-bottom: 1px solid var(--border); padding: 1rem; display: flex; justify-content: space-between; align-items: center; }
-        nav { display: flex; gap: .75rem; margin-top: .5rem; }
-        nav a { color: inherit; }
-        main { display: grid; grid-template-columns: 360px minmax(360px, 1fr) 420px; min-height: calc(100vh - 65px); }
-        section { border-right: 1px solid var(--border); padding: 1rem; overflow: auto; }
-        section:last-child { border-right: 0; }
-        h1, h2, h3 { margin: 0 0 .75rem; }
-        button { border: 1px solid var(--border); border-radius: .4rem; background: canvas; padding: .4rem .6rem; cursor: pointer; }
-        .list { display: grid; gap: .5rem; }
-        .card { border: 1px solid var(--border); border-radius: .5rem; padding: .7rem; background: canvas; cursor: pointer; }
-        .card:hover, .card.selected { outline: 2px solid #0969da; }
-        .muted { color: var(--muted); font-size: .85rem; }
-        .row { display: flex; gap: .5rem; align-items: center; justify-content: space-between; }
-        .badge { border-radius: 999px; padding: .15rem .45rem; font-size: .75rem; font-weight: 700; }
-        .kind-badge { border-radius: .25rem; padding: .1rem .35rem; font-size: .7rem; font-weight: 600; background: var(--bg); color: var(--muted); text-transform: uppercase; }
-        .Succeeded { background: #dafbe1; color: #116329; }
-        .Failed, .Cancelled, .Blocked { background: #ffebe9; color: #82071e; }
-        .Running { background: #fff8c5; color: #7d4e00; }
-        .Pending, .Empty { background: var(--bg); color: var(--muted); }
-        .node { border: 1px solid var(--border); border-left-width: .45rem; border-radius: .5rem; padding: .65rem; cursor: pointer; margin-bottom: .5rem; }
-        .node.Succeeded { border-left-color: #2da44e; }
-        .node.Failed, .node.Cancelled, .node.Blocked { border-left-color: #cf222e; }
-        .node.Running, .node.Pending { border-left-color: #bf8700; }
-        pre { white-space: pre-wrap; overflow-wrap: anywhere; background: var(--code-bg); color: var(--code-fg); padding: .75rem; border-radius: .5rem; max-height: 45vh; overflow: auto; }
-        dl { display: grid; grid-template-columns: 7rem 1fr; gap: .35rem .75rem; }
-        dt { color: var(--muted); }
-        dd { margin: 0; overflow-wrap: anywhere; }
-      </style>
-    </head>
-    <body>
-      <header>
-        <div>
-          <h1>ttasks turns</h1>
-          <div class="muted">Per-turn reasoning + execution trail</div>
-          <nav>
-            <a href="/admin">Graphs and tasks</a>
-            <strong>Turns</strong>
-            <a href="/admin/capabilities">Capabilities</a>
-            <a href="/admin/library">Task library</a>
-            <a href="/admin/graph-library">Graph library</a>
-          </nav>
-        </div>
-        <button id="refresh">Refresh</button>
-      </header>
-      <main>
-        <section>
-          <h2>Recent turns</h2>
-          <div id="turns" class="list">Loading...</div>
-        </section>
-        <section>
-          <h2 id="turn-title">Turn detail</h2>
-          <div id="turn-meta" class="muted"></div>
-          <div id="turn-tasks"></div>
-        </section>
-        <section>
-          <h2>Task inspector</h2>
-          <div id="task">Select a task.</div>
-        </section>
-      </main>
-      <script>
-        const turnsEl = document.getElementById('turns');
-        const turnTasksEl = document.getElementById('turn-tasks');
-        const turnTitleEl = document.getElementById('turn-title');
-        const turnMetaEl = document.getElementById('turn-meta');
-        const taskEl = document.getElementById('task');
-        let selectedTurnId = null;
-        let selectedTaskId = null;
+    return AdminLayout("Dashboard", "Graph runs and tasks persisted across chat turns.", "dashboard", body, script);
+}
 
-        document.getElementById('refresh').addEventListener('click', loadTurns);
-
-        function badge(status) {
-          return `<span class="badge ${status}">${status}</span>`;
-        }
-
-        function fmtTime(value) {
-          return new Date(value).toLocaleString();
-        }
-
-        async function loadTurns() {
-          turnsEl.textContent = 'Loading...';
-          const turns = await fetch('/api/admin/turns?limit=100').then(r => r.json());
-          turnsEl.innerHTML = '';
-          if (turns.length === 0) {
-            turnsEl.textContent = 'No turns persisted yet. Send a chat message to create one.';
-            return;
-          }
-          for (const turn of turns) {
-            const card = document.createElement('div');
-            card.className = `card ${turn.turnId === selectedTurnId ? 'selected' : ''}`;
-            const counts = [];
-            if (turn.routerCount) counts.push(`${turn.routerCount} router`);
-            if (turn.plannerCount) counts.push(`${turn.plannerCount} planner`);
-            if (turn.repairCount) counts.push(`${turn.repairCount} repair`);
-            if (turn.processCount) counts.push(`${turn.processCount} process`);
-            if (turn.summaryCount) counts.push(`${turn.summaryCount} summary`);
-            card.innerHTML = `
-              <div class="row"><strong>${escapeHtml(turn.turnId.slice(0, 8))}</strong>${badge(turn.status)}</div>
-              <div class="muted">${fmtTime(turn.createdAt)}</div>
-              <div class="muted">${turn.taskCount} tasks: ${counts.join(', ') || 'none'}</div>
-              <div class="muted">session ${escapeHtml((turn.sessionId || '').slice(0, 16))}</div>`;
-            card.addEventListener('click', () => loadTurn(turn.turnId));
-            turnsEl.appendChild(card);
-          }
-          if (!selectedTurnId) {
-            await loadTurn(turns[0].turnId);
-          }
-        }
-
-        async function loadTurn(turnId) {
-          selectedTurnId = turnId;
-          selectedTaskId = null;
-          const turn = await fetch(`/api/admin/turns/${encodeURIComponent(turnId)}`).then(r => r.json());
-          turnTitleEl.textContent = `Turn ${turn.turnId.slice(0, 8)}`;
-          turnMetaEl.textContent = `${turn.turnId} - session ${turn.sessionId || ''} - ${fmtTime(turn.createdAt)} - ${turn.status}`;
-          renderTurn(turn);
-          taskEl.textContent = 'Select a task.';
-          highlightTurns();
-        }
-
-        function highlightTurns() {
-          for (const card of turnsEl.children) {
-            const id = card.querySelector('strong')?.textContent;
-            card.classList.toggle('selected', selectedTurnId?.startsWith(id || ''));
-          }
-        }
-
-        function renderTurn(turn) {
-          turnTasksEl.innerHTML = '';
-          for (const task of turn.tasks) {
-            const node = document.createElement('div');
-            node.className = `node ${task.status}`;
-            const attempt = task.attempt ? ` (attempt ${task.attempt})` : '';
-            node.innerHTML = `
-              <div class="row">
-                <strong><span class="kind-badge">${escapeHtml(task.kind)}</span> ${escapeHtml(task.title || task.id.slice(0, 8))}${attempt}</strong>
-                ${badge(task.status)}
-              </div>
-              <div class="muted">${escapeHtml(task.type)} - ${escapeHtml(task.id)} - ${fmtTime(task.createdAt)}</div>
-              ${task.error ? `<div class="muted">error: ${escapeHtml(task.error)}</div>` : ''}`;
-            node.addEventListener('click', () => loadTask(task.id));
-            turnTasksEl.appendChild(node);
-          }
-        }
-
-        async function loadTask(id) {
-          selectedTaskId = id;
-          const task = await fetch(`/api/admin/tasks/${encodeURIComponent(id)}`).then(r => r.json());
-          taskEl.innerHTML = `
-            <h3>${escapeHtml(task.title || task.id)}</h3>
-            <dl>
-              <dt>id</dt><dd>${escapeHtml(task.id)}</dd>
-              <dt>type</dt><dd>${escapeHtml(task.type)}</dd>
-              <dt>status</dt><dd>${badge(task.status)}</dd>
-              <dt>created</dt><dd>${fmtTime(task.createdAt)}</dd>
-              <dt>timeout</dt><dd>${task.timeout ?? ''}</dd>
-              <dt>error</dt><dd>${escapeHtml(task.error || task.result?.error || '')}</dd>
-            </dl>
-            <h3>Metadata</h3>
-            <pre>${escapeHtml(JSON.stringify(task.metadata || {}, null, 2))}</pre>
-            <h3>Payload</h3>
-            <pre>${escapeHtml(task.payload)}</pre>
-            <h3>Output</h3>
-            <pre>${escapeHtml(task.result?.output || '')}</pre>`;
-        }
-
-        function escapeHtml(value) {
-          return String(value ?? '').replace(/[&<>"']/g, ch => ({
-            '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
-          }[ch]));
-        }
-
-        loadTurns();
-      </script>
-    </body>
-    </html>
+static string CapabilitiesPage()
+{
+    var body = """
+    <div id="capabilities" class="grid grid-cols-1 lg:grid-cols-2 gap-4">
+      <div class="muted">Loading…</div>
+    </div>
     """;
 
-static string GraphLibraryPage() =>
-    """
-    <!doctype html>
-    <html lang="en">
-    <head>
-      <meta charset="utf-8" />
-      <meta name="viewport" content="width=device-width, initial-scale=1" />
-      <title>ttasks graph library</title>
-      <style>
-        :root { color-scheme: light dark; --border: #d0d7de; --muted: #57606a; --bg: #f6f8fa; --code-bg: #f6f8fa; --code-fg: #24292f; }
-        @media (prefers-color-scheme: dark) {
-          :root { --border: #8b949e; --muted: #8b949e; --bg: #161b22; --code-bg: #161b22; --code-fg: #e6edf3; }
-        }
-        body { font-family: system-ui, sans-serif; margin: 0; }
-        header { border-bottom: 1px solid var(--border); padding: 1rem; display: flex; justify-content: space-between; align-items: center; }
-        nav { display: flex; gap: .75rem; margin-top: .5rem; }
-        nav a { color: inherit; }
-        main { display: grid; grid-template-columns: 360px minmax(360px, 1fr); min-height: calc(100vh - 65px); }
-        section { border-right: 1px solid var(--border); padding: 1rem; overflow: auto; }
-        section:last-child { border-right: 0; }
-        h1, h2, h3 { margin: 0 0 .75rem; }
-        button { border: 1px solid var(--border); border-radius: .4rem; background: canvas; padding: .4rem .6rem; cursor: pointer; }
-        .list { display: grid; gap: .5rem; }
-        .card { border: 1px solid var(--border); border-radius: .5rem; padding: .7rem; background: canvas; cursor: pointer; }
-        .card:hover, .card.selected { outline: 2px solid #0969da; }
-        .muted { color: var(--muted); font-size: .85rem; }
-        .row { display: flex; gap: .5rem; align-items: center; justify-content: space-between; }
-        pre { white-space: pre-wrap; overflow-wrap: anywhere; background: var(--code-bg); color: var(--code-fg); padding: .75rem; border-radius: .5rem; max-height: 45vh; overflow: auto; }
-        dl { display: grid; grid-template-columns: 8rem 1fr; gap: .35rem .75rem; }
-        dt { color: var(--muted); }
-        dd { margin: 0; overflow-wrap: anywhere; }
-      </style>
-    </head>
-    <body>
-      <header>
-        <div>
-          <h1>ttasks graph library</h1>
-          <div class="muted">Reusable multi-task workflow templates</div>
-          <nav>
-            <a href="/admin">Graphs and tasks</a>
-            <a href="/admin/turns">Turns</a>
-            <a href="/admin/capabilities">Capabilities</a>
-            <a href="/admin/library">Task library</a>
-            <strong>Graph library</strong>
-          </nav>
-        </div>
-        <button id="refresh">Refresh</button>
-      </header>
-      <main>
-        <section>
-          <h2>Graph templates</h2>
-          <div id="items" class="list">Loading...</div>
-        </section>
-        <section>
-          <h2>Template detail</h2>
-          <div id="detail">Select a template.</div>
-        </section>
-      </main>
-      <script>
-        const itemsEl = document.getElementById('items');
-        const detailEl = document.getElementById('detail');
-        let items = [];
-        let selectedKey = null;
-        document.getElementById('refresh').addEventListener('click', loadItems);
+    var script = """
+    const capabilitiesEl = document.getElementById('capabilities');
+    document.getElementById('refresh').addEventListener('click', loadCapabilities);
 
-        async function loadItems() {
-          itemsEl.textContent = 'Loading...';
-          items = await fetch('/api/admin/graph-library').then(r => r.json());
-          itemsEl.innerHTML = '';
-          if (items.length === 0) {
-            itemsEl.textContent = 'No graph templates yet. The planner promotes graph templates after a successful authored graph that included a graphSuggestion.';
-            detailEl.textContent = 'No templates are available.';
-            return;
-          }
-          for (const item of items) {
-            const card = document.createElement('div');
-            card.className = `card ${item.key === selectedKey ? 'selected' : ''}`;
-            card.innerHTML = `
-              <div class="row"><strong>${escapeHtml(item.displayName || item.key)}</strong></div>
-              <div class="muted">${escapeHtml(item.key)}</div>
-              <div class="muted">${item.planTemplate.tasks.length} tasks - ${fmtTime(item.createdAt)}</div>`;
-            card.addEventListener('click', () => selectItem(item.key));
-            itemsEl.appendChild(card);
-          }
-          if (!selectedKey) selectItem(items[0].key);
-        }
-
-        function selectItem(key) {
-          selectedKey = key;
-          const item = items.find(i => i.key === key);
-          if (!item) return;
-          for (const card of itemsEl.children) {
-            const muted = card.querySelector('.muted');
-            card.classList.toggle('selected', muted && muted.textContent === key);
-          }
-          const params = (item.parameters || []).map(p => `${escapeHtml(p.name)} (${escapeHtml(p.source)}${p.defaultValue !== null && p.defaultValue !== undefined ? ', default=' + escapeHtml(String(p.defaultValue)) : ''})`).join(', ');
-          detailEl.innerHTML = `
-            <h3>${escapeHtml(item.displayName || item.key)}</h3>
-            <dl>
-              <dt>key</dt><dd>${escapeHtml(item.key)}</dd>
-              <dt>created</dt><dd>${fmtTime(item.createdAt)}</dd>
-              <dt>description</dt><dd>${escapeHtml(item.description)}</dd>
-              <dt>parameters</dt><dd>${params || '(none)'}</dd>
-            </dl>
-            <h3>Plan template</h3>
-            <pre>${escapeHtml(JSON.stringify(item.planTemplate, null, 2))}</pre>`;
-        }
-
-        function fmtTime(value) { return new Date(value).toLocaleString(); }
-        function escapeHtml(value) {
-          return String(value ?? '').replace(/[&<>"']/g, ch => ({
-            '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
-          }[ch]));
-        }
-
-        loadItems();
-      </script>
-    </body>
-    </html>
+    async function loadCapabilities() {
+      capabilitiesEl.innerHTML = '<div class="muted">Loading…</div>';
+      const capabilities = await fetch('/api/admin/capabilities').then(r => r.json());
+      capabilitiesEl.innerHTML = '';
+      if (capabilities.length === 0) {
+        capabilitiesEl.innerHTML = '<div class="muted">No capabilities registered.</div>';
+        return;
+      }
+      for (const capability of capabilities) {
+        const card = document.createElement('div');
+        card.className = 'card';
+        card.innerHTML = `
+          <div class="row"><h2 class="panel-title"><code class="inline">${tt.escapeHtml(capability.prefix)}</code></h2><span class="pill pill-muted">prefix</span></div>
+          <p class="mt-2 text-sm text-slate-700">${tt.escapeHtml(capability.description || '(no description)')}</p>
+          ${capability.helpCommand ? `<p class="muted mt-2"><strong>Help:</strong> <code class="inline">${tt.escapeHtml(capability.helpCommand)}</code></p>` : ''}`;
+        capabilitiesEl.appendChild(card);
+      }
+    }
+    loadCapabilities();
     """;
+
+    return AdminLayout("Capabilities", "Host-approved actions the chat planner can use.", "capabilities", body, script);
+}
+
+static string TaskLibraryPage()
+{
+    var body = """
+    <div class="grid gap-4" style="grid-template-columns: 360px minmax(360px, 1fr);">
+      <div class="panel" style="max-height: calc(100vh - 56px - 2.5rem); min-height: 480px;">
+        <div class="panel-header"><h2 class="panel-title">Library items</h2></div>
+        <div class="panel-body"><div id="library" class="flex flex-col gap-2"><div class="muted">Loading…</div></div></div>
+      </div>
+      <div class="panel" style="max-height: calc(100vh - 56px - 2.5rem); min-height: 480px;">
+        <div class="panel-header"><h2 class="panel-title">Library item detail</h2></div>
+        <div class="panel-body"><div id="detail" class="muted">Select a library item.</div></div>
+      </div>
+    </div>
+    """;
+
+    var script = """
+    const libraryEl = document.getElementById('library');
+    const detailEl = document.getElementById('detail');
+    let items = [];
+    let selectedKey = null;
+    document.getElementById('refresh').addEventListener('click', loadLibrary);
+
+    function highlight() {
+      for (const card of libraryEl.children) {
+        if (!card.dataset || !card.dataset.key) continue;
+        card.classList.toggle('card-selected', card.dataset.key === selectedKey);
+      }
+    }
+
+    async function loadLibrary() {
+      libraryEl.innerHTML = '<div class="muted">Loading…</div>';
+      items = await fetch('/api/admin/library').then(r => r.json());
+      libraryEl.innerHTML = '';
+      if (items.length === 0) {
+        libraryEl.innerHTML = '<div class="muted">No reusable tasks yet.</div>';
+        detailEl.innerHTML = '<div class="muted">No library items are available.</div>';
+        return;
+      }
+      for (const item of items) {
+        const card = document.createElement('div');
+        card.className = 'card card-hover';
+        card.dataset.key = item.key;
+        card.innerHTML = `
+          <div class="row"><strong>${tt.escapeHtml(item.displayName || item.key)}</strong></div>
+          <div class="muted mt-1"><code class="inline">${tt.escapeHtml(item.key)}</code></div>
+          <div class="muted">${tt.fmtTime(item.createdAt)}</div>`;
+        card.addEventListener('click', () => selectItem(item.key));
+        libraryEl.appendChild(card);
+      }
+      if (!selectedKey) selectItem(items[0].key);
+      else highlight();
+    }
+
+    function selectItem(key) {
+      selectedKey = key;
+      const item = items.find(c => c.key === key);
+      if (!item) return;
+      highlight();
+      detailEl.innerHTML = `
+        <div class="row mb-2"><strong>${tt.escapeHtml(item.displayName || item.key)}</strong></div>
+        <dl class="props">
+          <dt>id</dt><dd><code class="inline">${tt.escapeHtml(item.id)}</code></dd>
+          <dt>key</dt><dd><code class="inline">${tt.escapeHtml(item.key)}</code></dd>
+          <dt>fileName</dt><dd><code class="inline">${tt.escapeHtml(item.fileName)}</code></dd>
+          <dt>created</dt><dd>${tt.fmtTime(item.createdAt)}</dd>
+          <dt>description</dt><dd>${tt.escapeHtml(item.description)}</dd>
+        </dl>
+        <div class="detail-section-title">Args template</div>
+        <pre class="code">${tt.escapeHtml(JSON.stringify(item.argsTemplate || [], null, 2))}</pre>
+        <div class="detail-section-title">Metadata</div>
+        <pre class="code">${tt.escapeHtml(JSON.stringify(item.metadata || {}, null, 2))}</pre>`;
+    }
+
+    loadLibrary();
+    """;
+
+    return AdminLayout("Task library", "Saved reusable capability task templates.", "library", body, script);
+}
+
+static string TurnsPage()
+{
+    var body = """
+    <div class="grid gap-4" style="grid-template-columns: 300px 340px minmax(480px, 1fr);">
+      <div class="panel" style="max-height: calc(100vh - 56px - 2.5rem); min-height: 480px;">
+        <div class="panel-header"><h2 class="panel-title">Recent turns</h2></div>
+        <div class="panel-body"><div id="turns" class="flex flex-col gap-2"><div class="muted">Loading…</div></div></div>
+      </div>
+      <div class="panel" style="max-height: calc(100vh - 56px - 2.5rem); min-height: 480px;">
+        <div class="panel-header"><div><h2 class="panel-title" id="turn-title">Turn detail</h2><p class="panel-subtitle" id="turn-meta">Select a turn from the list.</p></div></div>
+        <div class="panel-body"><div id="turn-tasks"></div></div>
+      </div>
+      <div class="panel" style="max-height: calc(100vh - 56px - 2.5rem); min-height: 480px;">
+        <div class="panel-header"><h2 class="panel-title">Task inspector</h2></div>
+        <div class="panel-body"><div id="task" class="muted">Select a task to inspect.</div></div>
+      </div>
+    </div>
+    """;
+
+    var script = """
+    const turnsEl = document.getElementById('turns');
+    const turnTasksEl = document.getElementById('turn-tasks');
+    const turnTitleEl = document.getElementById('turn-title');
+    const turnMetaEl = document.getElementById('turn-meta');
+    const taskEl = document.getElementById('task');
+    let selectedTurnId = null;
+
+    document.getElementById('refresh').addEventListener('click', loadTurns);
+
+    function highlight() {
+      for (const card of turnsEl.children) {
+        if (!card.dataset || !card.dataset.turnId) continue;
+        card.classList.toggle('card-selected', card.dataset.turnId === selectedTurnId);
+      }
+    }
+
+    async function loadTurns() {
+      turnsEl.innerHTML = '<div class="muted">Loading…</div>';
+      const turns = await fetch('/api/admin/turns?limit=100').then(r => r.json());
+      turnsEl.innerHTML = '';
+      if (turns.length === 0) {
+        turnsEl.innerHTML = '<div class="muted">No turns persisted yet. Send a chat message to create one.</div>';
+        return;
+      }
+      for (const turn of turns) {
+        const card = document.createElement('div');
+        card.className = 'card card-hover';
+        card.dataset.turnId = turn.turnId;
+        const counts = [];
+        if (turn.routerCount) counts.push(`${turn.routerCount} router`);
+        if (turn.plannerCount) counts.push(`${turn.plannerCount} planner`);
+        if (turn.repairCount) counts.push(`${turn.repairCount} repair`);
+        if (turn.processCount) counts.push(`${turn.processCount} process`);
+        if (turn.summaryCount) counts.push(`${turn.summaryCount} summary`);
+        card.innerHTML = `
+          <div class="row"><strong><code class="inline">${tt.escapeHtml(tt.shortId(turn.turnId))}</code></strong>${tt.pill(turn.status)}</div>
+          <div class="muted mt-1">${tt.fmtTime(turn.createdAt)}</div>
+          <div class="muted">${turn.taskCount} tasks · ${counts.join(' · ') || 'none'}</div>
+          <div class="muted">session ${tt.escapeHtml(tt.shortId(turn.sessionId, 16))}</div>`;
+        card.addEventListener('click', () => loadTurn(turn.turnId));
+        turnsEl.appendChild(card);
+      }
+      if (!selectedTurnId) await loadTurn(turns[0].turnId);
+      else highlight();
+    }
+
+    async function loadTurn(turnId) {
+      selectedTurnId = turnId;
+      highlight();
+      const turn = await fetch(`/api/admin/turns/${encodeURIComponent(turnId)}`).then(r => r.json());
+      turnTitleEl.textContent = `Turn ${tt.shortId(turn.turnId)}`;
+      turnMetaEl.textContent = `${turn.turnId} · session ${turn.sessionId || ''} · ${tt.fmtTime(turn.createdAt)} · ${turn.status}`;
+      renderTurn(turn);
+      taskEl.innerHTML = '<div class="muted">Select a task to inspect.</div>';
+    }
+
+    function renderTurn(turn) {
+      turnTasksEl.innerHTML = '';
+      for (const task of turn.tasks) {
+        const node = document.createElement('div');
+        node.className = `node ${task.status}`;
+        const attempt = task.attempt ? ` (attempt ${task.attempt})` : '';
+        node.innerHTML = `
+          <div class="row">
+            <strong>${tt.kindBadge(task.kind)}${tt.escapeHtml(task.title || tt.shortId(task.id))}${attempt}</strong>
+            ${tt.pill(task.status)}
+          </div>
+          <div class="muted">${tt.escapeHtml(task.type)} · <code class="inline">${tt.escapeHtml(task.id)}</code> · ${tt.fmtTime(task.createdAt)}</div>
+          ${task.error ? `<div class="muted">error: ${tt.escapeHtml(task.error)}</div>` : ''}`;
+        node.addEventListener('click', () => loadTask(task.id));
+        turnTasksEl.appendChild(node);
+      }
+    }
+
+    async function loadTask(id) {
+      const task = await fetch(`/api/admin/tasks/${encodeURIComponent(id)}`).then(r => r.json());
+      taskEl.innerHTML = `
+        <div class="row mb-2"><strong>${tt.escapeHtml(task.title || task.id)}</strong>${tt.pill(task.status)}</div>
+        <dl class="props">
+          <dt>id</dt><dd><code class="inline">${tt.escapeHtml(task.id)}</code></dd>
+          <dt>type</dt><dd>${tt.escapeHtml(task.type)}</dd>
+          <dt>created</dt><dd>${tt.fmtTime(task.createdAt)}</dd>
+          <dt>timeout</dt><dd>${task.timeout ?? '—'}</dd>
+          <dt>error</dt><dd>${tt.escapeHtml(task.error || task.result?.error || '—')}</dd>
+        </dl>
+        <div class="detail-section-title">Metadata</div>
+        <pre class="code">${tt.escapeHtml(JSON.stringify(task.metadata || {}, null, 2))}</pre>
+        <div class="detail-section-title">Payload</div>
+        <pre class="code">${tt.escapeHtml(task.payload)}</pre>
+        <div class="detail-section-title">Output</div>
+        <pre class="code">${tt.escapeHtml(task.result?.output || '')}</pre>`;
+    }
+
+    loadTurns();
+    """;
+
+    return AdminLayout("Turns", "Per-turn reasoning and execution trail.", "turns", body, script);
+}
+
+static string GraphLibraryPage()
+{
+    var body = """
+    <div class="grid gap-4" style="grid-template-columns: 360px minmax(360px, 1fr);">
+      <div class="panel" style="max-height: calc(100vh - 56px - 2.5rem); min-height: 480px;">
+        <div class="panel-header"><h2 class="panel-title">Graph templates</h2></div>
+        <div class="panel-body"><div id="items" class="flex flex-col gap-2"><div class="muted">Loading…</div></div></div>
+      </div>
+      <div class="panel" style="max-height: calc(100vh - 56px - 2.5rem); min-height: 480px;">
+        <div class="panel-header"><h2 class="panel-title">Template detail</h2></div>
+        <div class="panel-body"><div id="detail" class="muted">Select a template.</div></div>
+      </div>
+    </div>
+    """;
+
+    var script = """
+    const itemsEl = document.getElementById('items');
+    const detailEl = document.getElementById('detail');
+    let items = [];
+    let selectedKey = null;
+    document.getElementById('refresh').addEventListener('click', loadItems);
+
+    function highlight() {
+      for (const card of itemsEl.children) {
+        if (!card.dataset || !card.dataset.key) continue;
+        card.classList.toggle('card-selected', card.dataset.key === selectedKey);
+      }
+    }
+
+    async function loadItems() {
+      itemsEl.innerHTML = '<div class="muted">Loading…</div>';
+      items = await fetch('/api/admin/graph-library').then(r => r.json());
+      itemsEl.innerHTML = '';
+      if (items.length === 0) {
+        itemsEl.innerHTML = '<div class="muted">No graph templates yet. The planner promotes graph templates after a successful authored graph that included a graphSuggestion.</div>';
+        detailEl.innerHTML = '<div class="muted">No templates are available.</div>';
+        return;
+      }
+      for (const item of items) {
+        const card = document.createElement('div');
+        card.className = 'card card-hover';
+        card.dataset.key = item.key;
+        card.innerHTML = `
+          <div class="row"><strong>${tt.escapeHtml(item.displayName || item.key)}</strong></div>
+          <div class="muted mt-1"><code class="inline">${tt.escapeHtml(item.key)}</code></div>
+          <div class="muted">${item.planTemplate.tasks.length} tasks · ${tt.fmtTime(item.createdAt)}</div>`;
+        card.addEventListener('click', () => selectItem(item.key));
+        itemsEl.appendChild(card);
+      }
+      if (!selectedKey) selectItem(items[0].key);
+      else highlight();
+    }
+
+    function selectItem(key) {
+      selectedKey = key;
+      const item = items.find(i => i.key === key);
+      if (!item) return;
+      highlight();
+      const params = (item.parameters || []).map(p => `${tt.escapeHtml(p.name)} (${tt.escapeHtml(p.source)}${p.defaultValue !== null && p.defaultValue !== undefined ? ', default=' + tt.escapeHtml(String(p.defaultValue)) : ''})`).join(', ');
+      detailEl.innerHTML = `
+        <div class="row mb-2"><strong>${tt.escapeHtml(item.displayName || item.key)}</strong></div>
+        <dl class="props">
+          <dt>key</dt><dd><code class="inline">${tt.escapeHtml(item.key)}</code></dd>
+          <dt>created</dt><dd>${tt.fmtTime(item.createdAt)}</dd>
+          <dt>description</dt><dd>${tt.escapeHtml(item.description)}</dd>
+          <dt>parameters</dt><dd>${params || '(none)'}</dd>
+        </dl>
+        <div class="detail-section-title">Plan template</div>
+        <pre class="code">${tt.escapeHtml(JSON.stringify(item.planTemplate, null, 2))}</pre>`;
+    }
+
+    loadItems();
+    """;
+
+    return AdminLayout("Graph library", "Reusable multi-task workflow templates.", "graph-library", body, script);
+}
