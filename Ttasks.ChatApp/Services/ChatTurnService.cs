@@ -514,12 +514,15 @@ public sealed class ChatTurnService
         return new GraphSnapshot(answer ?? string.Empty, tasks);
     }
 
-    private static TaskExecutor CreatePromptExecutor(LlmAgentSession session, bool includeUpstreamResults, ITaskStore? store = null)
+    private TaskExecutor CreatePromptExecutor(LlmAgentSession session, bool includeUpstreamResults, ITaskStore? store = null)
     {
         var executor = new TaskExecutor(store);
         executor.Register(TaskType.Prompt, session.PromptHandler(new LlmHandlerOptions
         {
-            IncludeUpstreamResults = includeUpstreamResults
+            IncludeUpstreamResults = includeUpstreamResults,
+            Timeout = _options.LlmTimeoutSeconds > 0
+                ? TimeSpan.FromSeconds(_options.LlmTimeoutSeconds)
+                : null
         }));
         return executor;
     }
