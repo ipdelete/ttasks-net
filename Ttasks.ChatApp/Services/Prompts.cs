@@ -185,6 +185,13 @@ internal static class Prompts
         - A subcommand like `teams read` exposes only that subcommand.
         - A fully-qualified command like `az account list` exposes only that exact command.
 
+        Each tool may carry a `traits` array using a CDM-style dotted hierarchy
+        (for example `means.communication.email`, `operates.on.person`). Traits are
+        prefix-inclusive: a tool tagged `means.communication.chat` also satisfies
+        the broader `means.communication` intent. Prefer tools whose traits match
+        the user's intent and operand types. Traits are guidance only — the validator
+        still enforces prefix membership, not trait membership.
+
         Never invent identifiers (chat IDs, channel IDs, mail folders, calendar IDs, paths, URLs) that the user did not provide.
 
         {{DynamicBindingGuidance}}
@@ -410,7 +417,18 @@ internal static class Prompts
 
     public static string FormatAllowedTools(IReadOnlyList<AllowedTool> tools) =>
         JsonSerializer.Serialize(
-            tools.Select(tool => new { prefix = tool.Prefix, description = tool.Description, helpCommand = tool.HelpCommand }),
+            tools.Select(tool =>
+            {
+                var entry = new Dictionary<string, object?>(StringComparer.Ordinal)
+                {
+                    ["prefix"] = tool.Prefix,
+                    ["description"] = tool.Description,
+                    ["helpCommand"] = tool.HelpCommand
+                };
+                if (tool.Traits is { Count: > 0 })
+                    entry["traits"] = tool.Traits;
+                return entry;
+            }),
             WriteIndented);
 
     public static string FormatLibrarySuggestions(IReadOnlyList<TaskLibraryItem> items) =>

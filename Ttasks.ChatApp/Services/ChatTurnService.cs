@@ -270,7 +270,7 @@ public sealed class ChatTurnService
 
                 if (graph.Ok)
                 {
-                    PromoteLibrarySuggestions(plan, graph);
+                    PromoteLibrarySuggestions(plan, graph, capabilities);
                     PromoteGraphSuggestion(authoredPlan, graph);
                     return new BatchOutcome(true, snapshot.Answer, lastGraphId, allTasks);
                 }
@@ -548,7 +548,7 @@ public sealed class ChatTurnService
         });
     }
 
-    private void PromoteLibrarySuggestions(GraphPlan plan, TaskGraph graph)
+    private void PromoteLibrarySuggestions(GraphPlan plan, TaskGraph graph, CapabilitySet capabilities)
     {
         var memberByPlanId = graph.Members
             .Where(task => task.Metadata.TryGetValue("planTaskId", out var raw) && raw is string)
@@ -567,6 +567,7 @@ public sealed class ChatTurnService
                 continue;
 
             var suggestion = planTask.LibrarySuggestion;
+            var metadata = EnrichMetadataWithTraits(suggestion, capabilities);
             _library.GetOrAdd(new TaskLibraryDefinition(
                 suggestion.Key,
                 suggestion.DisplayName,
@@ -574,8 +575,86 @@ public sealed class ChatTurnService
                 suggestion.FileName,
                 suggestion.ArgsTemplate.ToList(),
                 (suggestion.Parameters ?? []).ToList(),
-                suggestion.Metadata));
+                metadata));
         }
+    }
+
+    private static IReadOnlyDictionary<string, object?>? EnrichMetadataWithTraits(
+        LibrarySuggestion suggestion,
+        CapabilitySet capabilities)
+    {
+        var existing = suggestion.Metadata;
+        var hasAuthored = existing is not null
+            && existing.TryGetValue("traits", out var authoredRaw)
+            && authoredRaw is not null;
+
+        if (hasAuthored)
+        {
+            var copy = new Dictionary<string, object?>(existing!, StringComparer.Ordinal);
+            copy["traits.source"] = "authored";
+            return copy;
+        }
+
+        var inherited = InheritTraitsFor(suggestion, capabilities);
+        if (inherited.Count == 0)
+            return existing;
+
+        var merged = existing is null
+            ? new Dictionary<string, object?>(StringComparer.Ordinal)
+            : new Dictionary<string, object?>(existing, StringComparer.Ordinal);
+        merged["traits"] = inherited;
+        merged["traits.source"] = "inherited";
+        return merged;
+    }
+
+    private static IReadOnlyList<string> InheritTraitsFor(
+        LibrarySuggestion suggestion,
+        CapabilitySet capabilities)
+    {
+        if (capabilities.AllowedTools.Count == 0)
+            return [];
+
+        var head = ComputeSuggestionHead(suggestion);
+        if (string.IsNullOrEmpty(head))
+            return [];
+
+        var matches = capabilities.AllowedTools
+            .Where(tool => HeadStartsWithPrefix(head, tool.Prefix))
+            .ToList();
+        if (matches.Count == 0)
+            return [];
+
+        var union = new List<string>();
+        var seen = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var tool in matches)
+        {
+            if (tool.Traits is null)
+                continue;
+            foreach (var trait in tool.Traits)
+            {
+                if (seen.Add(trait))
+                    union.Add(trait);
+            }
+        }
+        return union;
+    }
+
+    private static string ComputeSuggestionHead(LibrarySuggestion suggestion)
+    {
+        var leadingArgs = suggestion.ArgsTemplate
+            .TakeWhile(arg => !arg.StartsWith("-", StringComparison.Ordinal)
+                && !arg.StartsWith("{", StringComparison.Ordinal));
+        return string.Join(' ', new[] { suggestion.FileName }.Concat(leadingArgs));
+    }
+
+    private static bool HeadStartsWithPrefix(string head, string prefix)
+    {
+        prefix = prefix.Trim();
+        if (string.IsNullOrEmpty(prefix))
+            return false;
+        if (string.Equals(head, prefix, StringComparison.Ordinal))
+            return true;
+        return head.StartsWith(prefix + " ", StringComparison.Ordinal);
     }
 
     private static string FormatBatchHistory(IReadOnlyList<BatchSummary> batches) =>

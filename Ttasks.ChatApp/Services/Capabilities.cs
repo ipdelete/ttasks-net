@@ -9,7 +9,11 @@ namespace Ttasks.ChatApp.Services;
 
 public sealed record CapabilityRequest(string SessionId, string UserMessage);
 
-public sealed record AllowedTool(string Prefix, string? Description = null, string? HelpCommand = null);
+public sealed record AllowedTool(
+    string Prefix,
+    string? Description = null,
+    string? HelpCommand = null,
+    IReadOnlyList<string>? Traits = null);
 
 public sealed record CapabilitySet(
     IReadOnlyList<AllowedTool> AllowedTools,
@@ -22,7 +26,7 @@ public interface ICapabilityProvider
     CapabilitySet GetCapabilities(CapabilityRequest request);
 }
 
-public sealed class ConfigCapabilityProvider : ICapabilityProvider
+public sealed partial class ConfigCapabilityProvider : ICapabilityProvider
 {
     private readonly ChatAppOptions _options;
     private readonly ITaskLibrary _library;
@@ -39,7 +43,11 @@ public sealed class ConfigCapabilityProvider : ICapabilityProvider
     {
         var allowed = _options.AllowedTools
             .Where(tool => !string.IsNullOrWhiteSpace(tool.Prefix))
-            .Select(tool => new AllowedTool(tool.Prefix.Trim(), tool.Description, tool.HelpCommand))
+            .Select(tool => new AllowedTool(
+                tool.Prefix.Trim(),
+                tool.Description,
+                tool.HelpCommand,
+                NormalizeTraits(tool.Traits)))
             .ToList();
 
         var suggestions = _library.All();
@@ -50,6 +58,32 @@ public sealed class ConfigCapabilityProvider : ICapabilityProvider
 
         return new CapabilitySet(allowed, suggestions, graphSuggestions, message);
     }
+
+    internal static IReadOnlyList<string>? NormalizeTraits(IEnumerable<string>? traits)
+    {
+        if (traits is null)
+            return null;
+
+        var seen = new HashSet<string>(StringComparer.Ordinal);
+        var normalized = new List<string>();
+        foreach (var raw in traits)
+        {
+            if (string.IsNullOrWhiteSpace(raw))
+                continue;
+
+            var collapsed = WhitespaceRegex().Replace(raw.Trim(), string.Empty)
+                .ToLowerInvariant();
+            if (collapsed.Length == 0)
+                continue;
+            if (seen.Add(collapsed))
+                normalized.Add(collapsed);
+        }
+
+        return normalized.Count == 0 ? null : normalized;
+    }
+
+    [GeneratedRegex("\\s+")]
+    private static partial Regex WhitespaceRegex();
 }
 
 public sealed record TemplateParameter(

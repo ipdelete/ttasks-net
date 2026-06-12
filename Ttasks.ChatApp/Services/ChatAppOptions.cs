@@ -18,6 +18,7 @@ public sealed class AllowedToolConfig
     public string Prefix { get; set; } = string.Empty;
     public string? Description { get; set; }
     public string? HelpCommand { get; set; }
+    public List<string> Traits { get; set; } = [];
 }
 
 public sealed class TaskLibrarySeed
