@@ -1,3 +1,4 @@
+using System.Runtime.InteropServices;
 using GitHub.Copilot;
 using Microsoft.Extensions.Options;
 using Ttasks.ChatApp.Services;
@@ -168,7 +169,9 @@ public sealed class ChatAppExperimentTests
     {
         var toolDir = Path.Combine(Path.GetTempPath(), $"ttasks-fake-mail-{Guid.NewGuid():N}");
         Directory.CreateDirectory(toolDir);
-        File.WriteAllText(Path.Combine(toolDir, "mail.cmd"), "@echo off\r\nif \"%1\"==\"fail\" exit /b 9\r\necho Count: 99\r\n");
+        WriteFakeTool(toolDir, "mail",
+            "@echo off\r\nif \"%1\"==\"fail\" exit /b 9\r\necho Count: 99\r\n",
+            "#!/bin/sh\nif [ \"$1\" = \"fail\" ]; then exit 9; fi\necho 'Count: 99'\n");
         var originalPath = Environment.GetEnvironmentVariable("PATH");
         var provider = new RecordingLlmProvider();
         provider.QueueResult(LlmTurnResult.Text("""{"mode":"graph","answer":null,"planIntent":"count mail"}"""));
@@ -245,11 +248,15 @@ public sealed class ChatAppExperimentTests
     {
         var toolDir = Path.Combine(Path.GetTempPath(), $"ttasks-fake-teams-{Guid.NewGuid():N}");
         Directory.CreateDirectory(toolDir);
-        File.WriteAllText(Path.Combine(toolDir, "teams.cmd"),
+        WriteFakeTool(toolDir, "teams",
             "@echo off\r\n" +
             "if \"%1\"==\"chat-list\" ( echo {\"chats\":[{\"id\":\"19:abc@thread.v2\",\"topic\":\"aet swe\"}]} & exit /b 0 )\r\n" +
             "if \"%1\"==\"read\" ( echo {\"messages\":[{\"from\":\"alice\",\"text\":\"hello\"}]} & exit /b 0 )\r\n" +
-            "exit /b 1\r\n");
+            "exit /b 1\r\n",
+            "#!/bin/sh\n" +
+            "if [ \"$1\" = \"chat-list\" ]; then echo '{\"chats\":[{\"id\":\"19:abc@thread.v2\",\"topic\":\"aet swe\"}]}'; exit 0; fi\n" +
+            "if [ \"$1\" = \"read\" ]; then echo '{\"messages\":[{\"from\":\"alice\",\"text\":\"hello\"}]}'; exit 0; fi\n" +
+            "exit 1\n");
         var originalPath = Environment.GetEnvironmentVariable("PATH");
         var provider = new RecordingLlmProvider();
         // 1. router
@@ -355,10 +362,9 @@ public sealed class ChatAppExperimentTests
     {
         var toolDir = Path.Combine(Path.GetTempPath(), $"ttasks-fake-repairsugg-{Guid.NewGuid():N}");
         Directory.CreateDirectory(toolDir);
-        File.WriteAllText(Path.Combine(toolDir, "echo.cmd"),
-            "@echo off\r\n" +
-            "if \"%1\"==\"bad\" exit /b 1\r\n" +
-            "echo OK=%1\r\nexit /b 0\r\n");
+        WriteFakeTool(toolDir, "echo",
+            "@echo off\r\nif \"%1\"==\"bad\" exit /b 1\r\necho OK=%1\r\nexit /b 0\r\n",
+            "#!/bin/sh\nif [ \"$1\" = \"bad\" ]; then exit 1; fi\necho \"OK=$1\"\n");
         var originalPath = Environment.GetEnvironmentVariable("PATH");
         try
         {
@@ -528,11 +534,15 @@ public sealed class ChatAppExperimentTests
     {
         var toolDir = Path.Combine(Path.GetTempPath(), $"ttasks-fake-graphlib-{Guid.NewGuid():N}");
         Directory.CreateDirectory(toolDir);
-        File.WriteAllText(Path.Combine(toolDir, "teams.cmd"),
+        WriteFakeTool(toolDir, "teams",
             "@echo off\r\n" +
             "if \"%1\"==\"chat-list\" ( echo {\"chats\":[{\"id\":\"19:xyz@thread.v2\",\"topic\":\"AET SWE\"}]} & exit /b 0 )\r\n" +
             "if \"%1\"==\"read\" ( echo READ_CHAT=%2 & exit /b 0 )\r\n" +
-            "exit /b 1\r\n");
+            "exit /b 1\r\n",
+            "#!/bin/sh\n" +
+            "if [ \"$1\" = \"chat-list\" ]; then echo '{\"chats\":[{\"id\":\"19:xyz@thread.v2\",\"topic\":\"AET SWE\"}]}'; exit 0; fi\n" +
+            "if [ \"$1\" = \"read\" ]; then echo \"READ_CHAT=$2\"; exit 0; fi\n" +
+            "exit 1\n");
         var originalPath = Environment.GetEnvironmentVariable("PATH");
         try
         {
@@ -596,7 +606,9 @@ public sealed class ChatAppExperimentTests
     {
         var toolDir = Path.Combine(Path.GetTempPath(), $"ttasks-fake-promote-{Guid.NewGuid():N}");
         Directory.CreateDirectory(toolDir);
-        File.WriteAllText(Path.Combine(toolDir, "echo.cmd"), "@echo off\r\necho OK=%1\r\nexit /b 0\r\n");
+        WriteFakeTool(toolDir, "echo",
+            "@echo off\r\necho OK=%1\r\nexit /b 0\r\n",
+            "#!/bin/sh\necho \"OK=$1\"\n");
         var originalPath = Environment.GetEnvironmentVariable("PATH");
         try
         {
@@ -654,11 +666,12 @@ public sealed class ChatAppExperimentTests
     {
         var toolDir = Path.Combine(Path.GetTempPath(), $"ttasks-fake-echo-{Guid.NewGuid():N}");
         Directory.CreateDirectory(toolDir);
-        // produce.cmd emits a raw text line; echo.cmd echoes whatever it gets as arg 1.
-        File.WriteAllText(Path.Combine(toolDir, "produce.cmd"),
-            "@echo off\r\necho line:initial-value\r\nexit /b 0\r\n");
-        File.WriteAllText(Path.Combine(toolDir, "echo.cmd"),
-            "@echo off\r\necho ECHOED=%1\r\nexit /b 0\r\n");
+        WriteFakeTool(toolDir, "produce",
+            "@echo off\r\necho line:initial-value\r\nexit /b 0\r\n",
+            "#!/bin/sh\necho 'line:initial-value'\n");
+        WriteFakeTool(toolDir, "echo",
+            "@echo off\r\necho ECHOED=%1\r\nexit /b 0\r\n",
+            "#!/bin/sh\necho \"ECHOED=$1\"\n");
         var originalPath = Environment.GetEnvironmentVariable("PATH");
         var provider = new RecordingLlmProvider();
         provider.QueueResult(LlmTurnResult.Text("""{"mode":"graph","answer":null,"planIntent":"produce then echo"}"""));
@@ -719,12 +732,15 @@ public sealed class ChatAppExperimentTests
     {
         var toolDir = Path.Combine(Path.GetTempPath(), $"ttasks-fake-teams-bind-{Guid.NewGuid():N}");
         Directory.CreateDirectory(toolDir);
-        // teams chat-list emits JSON with a chat id; teams read echoes whatever id arg it received.
-        File.WriteAllText(Path.Combine(toolDir, "teams.cmd"),
+        WriteFakeTool(toolDir, "teams",
             "@echo off\r\n" +
             "if \"%1\"==\"chat-list\" ( echo {\"chats\":[{\"id\":\"19:abc@thread.v2\",\"topic\":\"AET SWE\"}]} & exit /b 0 )\r\n" +
             "if \"%1\"==\"read\" ( echo READ_CHAT=%2 & exit /b 0 )\r\n" +
-            "exit /b 1\r\n");
+            "exit /b 1\r\n",
+            "#!/bin/sh\n" +
+            "if [ \"$1\" = \"chat-list\" ]; then echo '{\"chats\":[{\"id\":\"19:abc@thread.v2\",\"topic\":\"AET SWE\"}]}'; exit 0; fi\n" +
+            "if [ \"$1\" = \"read\" ]; then echo \"READ_CHAT=$2\"; exit 0; fi\n" +
+            "exit 1\n");
         var originalPath = Environment.GetEnvironmentVariable("PATH");
         var provider = new RecordingLlmProvider();
         provider.QueueResult(LlmTurnResult.Text("""{"mode":"graph","answer":null,"planIntent":"discover then read"}"""));
@@ -820,6 +836,22 @@ public sealed class ChatAppExperimentTests
             graphLibrary,
             new TaskLibraryTemplateRenderer(),
             options);
+    }
+
+    private static void WriteFakeTool(string dir, string name, string windowsScript, string shellScript)
+    {
+        if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
+        {
+            File.WriteAllText(Path.Combine(dir, name + ".cmd"), windowsScript);
+        }
+        else
+        {
+            var path = Path.Combine(dir, name);
+            File.WriteAllText(path, shellScript);
+            File.SetUnixFileMode(path, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute |
+                                       UnixFileMode.GroupRead | UnixFileMode.GroupExecute |
+                                       UnixFileMode.OtherRead | UnixFileMode.OtherExecute);
+        }
     }
 
     private sealed class ManualTimeProvider : TimeProvider
