@@ -104,7 +104,11 @@ public sealed class AdminService
     public IReadOnlyList<AdminAllowedTool> AllowedTools() =>
         _options.AllowedTools
             .Where(tool => !string.IsNullOrWhiteSpace(tool.Prefix))
-            .Select(tool => new AdminAllowedTool(tool.Prefix.Trim(), tool.Description, tool.HelpCommand))
+            .Select(tool => new AdminAllowedTool(
+                tool.Prefix.Trim(),
+                tool.Description,
+                tool.HelpCommand,
+                ConfigCapabilityProvider.NormalizeTraits(tool.Traits)))
             .ToList();
 
     public IReadOnlyList<AdminTurnSummary> RecentTurns(int limit = 50)

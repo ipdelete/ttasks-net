@@ -90,7 +90,11 @@ public sealed record AdminTaskLibraryItem(
     DateTimeOffset CreatedAt,
     IReadOnlyDictionary<string, object?> Metadata);
 
-public sealed record AdminAllowedTool(string Prefix, string? Description, string? HelpCommand);
+public sealed record AdminAllowedTool(
+    string Prefix,
+    string? Description,
+    string? HelpCommand,
+    IReadOnlyList<string>? Traits = null);
 
 public sealed record AdminGraphLibraryItem(
     string Id,

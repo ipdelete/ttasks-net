@@ -9,6 +9,7 @@ public sealed class ChatAppOptions
     public int DefaultTimeoutSeconds { get; set; } = 30;
     public int MaxGraphRepairAttempts { get; set; } = 2;
     public int MaxContinuationBatches { get; set; } = 0;
+    public int LlmTimeoutSeconds { get; set; } = 180;
     public List<AllowedToolConfig> AllowedTools { get; set; } = [];
     public List<TaskLibrarySeed> LibrarySeed { get; set; } = [];
 }
@@ -18,6 +19,7 @@ public sealed class AllowedToolConfig
     public string Prefix { get; set; } = string.Empty;
     public string? Description { get; set; }
     public string? HelpCommand { get; set; }
+    public List<string> Traits { get; set; } = [];
 }
 
 public sealed class TaskLibrarySeed
