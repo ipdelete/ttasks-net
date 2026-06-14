@@ -28,7 +28,7 @@ The project explores a safer pattern for LLM-assisted task execution:
 - in-memory and SQLite-backed stores
 - LLM prompt handlers through GitHub Copilot SDK integration
 - browser chat app with per-page shared sessions and replacement system prompt
-- config-driven allowed-tool capability boundary (prefix is the policy)
+- SQLite-backed allowed-tool capability boundary seeded from config and editable at runtime (prefix is the policy)
 - task library with parameterized process templates and success-only promotion of planner-authored suggestions
 - bounded repair loop that retries with failure observations before giving up
 - complete-result planning guidance for "all/total/count/complete" requests

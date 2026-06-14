@@ -220,7 +220,8 @@ public sealed class ChatAppExperimentTests
             Assert.Equal("mail", good.FileName);
             Assert.DoesNotContain(items, item => item.Key == "mail.bad");
 
-            var admin = new AdminService(store, library, new StoreBackedGraphLibrary(store), options);
+            var allowedToolRegistry = BuildAllowedToolRegistry(options);
+            var admin = new AdminService(store, library, new StoreBackedGraphLibrary(store), allowedToolRegistry);
             var turns = admin.RecentTurns();
             var turnSummary = Assert.Single(turns);
             Assert.Equal("page-1", turnSummary.SessionId);
@@ -311,7 +312,8 @@ public sealed class ChatAppExperimentTests
             Assert.Equal("AET SWE chat: alice said hello", response.Answer);
             Assert.Equal(6, provider.Requests.Count);
 
-            var admin = new AdminService(store, library, new StoreBackedGraphLibrary(store), options);
+            var allowedToolRegistry = BuildAllowedToolRegistry(options);
+            var admin = new AdminService(store, library, new StoreBackedGraphLibrary(store), allowedToolRegistry);
             var turnSummary = Assert.Single(admin.RecentTurns());
             var turn = admin.GetTurn(turnSummary.TurnId);
             var continuationTasks = turn.Tasks.Where(task => task.Kind == "continuation").ToList();
@@ -825,17 +827,26 @@ public sealed class ChatAppExperimentTests
         {
             AllowedTools = []
         });
+        var allowedToolRegistry = BuildAllowedToolRegistry(options);
         return new ChatTurnService(
             provider,
             new GraphPlanValidator(options),
             new GraphPlanBuilder(),
             registry ?? new ChatSessionRegistry(provider, options),
             store,
-            new ConfigCapabilityProvider(options, library, graphLibrary),
+            new StoreBackedCapabilityProvider(allowedToolRegistry, library, graphLibrary),
             library,
             graphLibrary,
             new TaskLibraryTemplateRenderer(),
             options);
+    }
+
+    private static AllowedToolRegistry BuildAllowedToolRegistry(IOptions<ChatAppOptions> options)
+    {
+        var store = new InMemoryAllowedToolStore();
+        var registry = new AllowedToolRegistry(store);
+        AllowedToolSeeder.Seed(registry, options.Value.AllowedTools);
+        return registry;
     }
 
     private static void WriteFakeTool(string dir, string name, string windowsScript, string shellScript)

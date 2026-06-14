@@ -18,7 +18,18 @@ builder.Services.AddSingleton<ITaskStore>(services =>
 builder.Services.AddSingleton<ITaskLibrary, StoreBackedTaskLibrary>();
 builder.Services.AddSingleton<IGraphLibrary, StoreBackedGraphLibrary>();
 builder.Services.AddSingleton<TaskLibraryTemplateRenderer>();
-builder.Services.AddSingleton<ICapabilityProvider, ConfigCapabilityProvider>();
+builder.Services.AddSingleton<IAllowedToolStore>(services =>
+{
+    var options = services.GetRequiredService<Microsoft.Extensions.Options.IOptions<ChatAppOptions>>().Value;
+    var environment = services.GetRequiredService<IHostEnvironment>();
+    var path = ResolvePath(options.StorePath, environment.ContentRootPath);
+    var directory = Path.GetDirectoryName(path);
+    if (!string.IsNullOrWhiteSpace(directory))
+        Directory.CreateDirectory(directory);
+    return new SqliteAllowedToolStore(path);
+});
+builder.Services.AddSingleton<AllowedToolRegistry>();
+builder.Services.AddSingleton<ICapabilityProvider, StoreBackedCapabilityProvider>();
 builder.Services.AddSingleton<GraphPlanValidator>();
 builder.Services.AddSingleton<GraphPlanBuilder>();
 builder.Services.AddSingleton<ChatSessionRegistry>();
@@ -34,7 +45,9 @@ app.UseStaticFiles();
 using (var scope = app.Services.CreateScope())
 {
     var library = scope.ServiceProvider.GetRequiredService<ITaskLibrary>();
+    var allowedTools = scope.ServiceProvider.GetRequiredService<AllowedToolRegistry>();
     var options = scope.ServiceProvider.GetRequiredService<Microsoft.Extensions.Options.IOptions<ChatAppOptions>>().Value;
+    AllowedToolSeeder.Seed(allowedTools, options.AllowedTools);
     TaskLibrarySeeder.Seed(library, options.LibrarySeed);
 }
 
@@ -216,6 +229,107 @@ app.MapDelete("/api/admin/graph-library/{key}", (string key, AdminService admin)
 
 app.MapGet("/api/admin/capabilities", (AdminService admin) => Results.Ok(admin.AllowedTools()));
 
+app.MapPost("/api/admin/capabilities", (
+    AdminCapabilityUpsertRequest request,
+    AdminService admin,
+    HttpContext httpContext,
+    Microsoft.Extensions.Options.IOptions<ChatAppOptions> options) =>
+{
+    if (!IsAuthorizedAdminWrite(httpContext, options.Value))
+        return Results.StatusCode(StatusCodes.Status403Forbidden);
+
+    try
+    {
+        var actor = ResolveActor(httpContext);
+        return Results.Ok(admin.CreateAllowedTool(request, actor));
+    }
+    catch (ArgumentException ex)
+    {
+        return Results.BadRequest(new { error = ex.Message });
+    }
+    catch (InvalidOperationException ex)
+    {
+        return Results.BadRequest(new { error = ex.Message });
+    }
+});
+
+app.MapPut("/api/admin/capabilities/{id}", (
+    string id,
+    AdminCapabilityUpsertRequest request,
+    AdminService admin,
+    HttpContext httpContext,
+    Microsoft.Extensions.Options.IOptions<ChatAppOptions> options) =>
+{
+    if (!IsAuthorizedAdminWrite(httpContext, options.Value))
+        return Results.StatusCode(StatusCodes.Status403Forbidden);
+
+    try
+    {
+        var actor = ResolveActor(httpContext);
+        return Results.Ok(admin.UpdateAllowedTool(id, request, actor));
+    }
+    catch (ArgumentException ex)
+    {
+        return Results.BadRequest(new { error = ex.Message });
+    }
+    catch (InvalidOperationException ex)
+    {
+        return Results.BadRequest(new { error = ex.Message });
+    }
+    catch (KeyNotFoundException ex)
+    {
+        return Results.NotFound(new { error = ex.Message });
+    }
+});
+
+app.MapPost("/api/admin/capabilities/{id}/enable", (
+    string id,
+    AdminService admin,
+    HttpContext httpContext,
+    Microsoft.Extensions.Options.IOptions<ChatAppOptions> options) =>
+{
+    if (!IsAuthorizedAdminWrite(httpContext, options.Value))
+        return Results.StatusCode(StatusCodes.Status403Forbidden);
+
+    try
+    {
+        var actor = ResolveActor(httpContext);
+        return Results.Ok(admin.SetAllowedToolEnabled(id, enabled: true, actor: actor));
+    }
+    catch (InvalidOperationException ex)
+    {
+        return Results.BadRequest(new { error = ex.Message });
+    }
+    catch (KeyNotFoundException ex)
+    {
+        return Results.NotFound(new { error = ex.Message });
+    }
+});
+
+app.MapPost("/api/admin/capabilities/{id}/disable", (
+    string id,
+    AdminService admin,
+    HttpContext httpContext,
+    Microsoft.Extensions.Options.IOptions<ChatAppOptions> options) =>
+{
+    if (!IsAuthorizedAdminWrite(httpContext, options.Value))
+        return Results.StatusCode(StatusCodes.Status403Forbidden);
+
+    try
+    {
+        var actor = ResolveActor(httpContext);
+        return Results.Ok(admin.SetAllowedToolEnabled(id, enabled: false, actor: actor));
+    }
+    catch (InvalidOperationException ex)
+    {
+        return Results.BadRequest(new { error = ex.Message });
+    }
+    catch (KeyNotFoundException ex)
+    {
+        return Results.NotFound(new { error = ex.Message });
+    }
+});
+
 app.MapGet("/api/admin/turns", (AdminService admin, int? limit) =>
 {
     var cappedLimit = Math.Clamp(limit ?? 50, 1, 200);
@@ -268,6 +382,37 @@ static string ResolvePath(string configuredPath, string contentRootPath)
     return Path.IsPathRooted(configuredPath)
         ? configuredPath
         : Path.GetFullPath(configuredPath, contentRootPath);
+}
+
+static bool IsAuthorizedAdminWrite(HttpContext httpContext, ChatAppOptions options)
+{
+    if (!string.IsNullOrWhiteSpace(options.AdminApiToken))
+    {
+        var provided = httpContext.Request.Headers["X-Admin-Token"].ToString();
+        if (string.Equals(provided, options.AdminApiToken, StringComparison.Ordinal))
+            return true;
+    }
+
+    if (!options.AdminWriteLocalOnly)
+        return true;
+
+    var remote = httpContext.Connection.RemoteIpAddress;
+    if (remote is null)
+        return true;
+    if (System.Net.IPAddress.IsLoopback(remote))
+        return true;
+    if (remote.IsIPv4MappedToIPv6 && System.Net.IPAddress.IsLoopback(remote.MapToIPv4()))
+        return true;
+    return false;
+}
+
+static string ResolveActor(HttpContext httpContext)
+{
+    var remote = httpContext.Connection.RemoteIpAddress?.ToString() ?? "unknown";
+    var forwarded = httpContext.Request.Headers["X-Forwarded-For"].ToString();
+    return string.IsNullOrWhiteSpace(forwarded)
+        ? remote
+        : $"{remote};xff={forwarded}";
 }
 
 static string Sidebar(string active)
@@ -494,10 +639,85 @@ static string CapabilitiesPage()
     var script = """
     const capabilitiesEl = document.getElementById('capabilities');
     document.getElementById('refresh').addEventListener('click', loadCapabilities);
+    document.getElementById('add').addEventListener('click', createCapability);
+
+    function parseTraits(raw) {
+      if (!raw || !raw.trim()) return null;
+      const traits = raw.split(',').map(x => x.trim()).filter(Boolean);
+      return traits.length ? traits : null;
+    }
+
+    async function requestJson(url, init = undefined) {
+      const response = await fetch(url, init);
+      const text = await response.text();
+      const body = text ? JSON.parse(text) : null;
+      if (!response.ok) {
+        throw new Error(body?.error || `Request failed with HTTP ${response.status}`);
+      }
+      return body;
+    }
+
+    async function createCapability() {
+      try {
+        const prefix = prompt('Capability prefix (example: gh issue list):');
+        if (!prefix || !prefix.trim()) return;
+        const description = prompt('Description (optional):') || null;
+        const helpCommand = prompt('Help command (optional):') || null;
+        const traitsRaw = prompt('Traits (comma-separated, optional):') || '';
+        await requestJson('/api/admin/capabilities', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({
+            prefix,
+            description,
+            helpCommand,
+            traits: parseTraits(traitsRaw),
+            enabled: true
+          })
+        });
+        await loadCapabilities();
+      } catch (error) {
+        alert(error.message);
+      }
+    }
+
+    async function editCapability(capability) {
+      try {
+        const prefix = prompt('Capability prefix:', capability.prefix);
+        if (!prefix || !prefix.trim()) return;
+        const description = prompt('Description (optional):', capability.description || '') || null;
+        const helpCommand = prompt('Help command (optional):', capability.helpCommand || '') || null;
+        const traitsRaw = prompt('Traits (comma-separated, optional):', (capability.traits || []).join(', ')) || '';
+        await requestJson(`/api/admin/capabilities/${encodeURIComponent(capability.id)}`, {
+          method: 'PUT',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({
+            prefix,
+            description,
+            helpCommand,
+            traits: parseTraits(traitsRaw),
+            enabled: capability.enabled
+          })
+        });
+        await loadCapabilities();
+      } catch (error) {
+        alert(error.message);
+      }
+    }
+
+    async function toggleCapability(capability) {
+      try {
+        const route = capability.enabled ? 'disable' : 'enable';
+        await requestJson(`/api/admin/capabilities/${encodeURIComponent(capability.id)}/${route}`, { method: 'POST' });
+        await loadCapabilities();
+      } catch (error) {
+        alert(error.message);
+      }
+    }
 
     async function loadCapabilities() {
       capabilitiesEl.innerHTML = '<div class="muted">Loading…</div>';
-      const capabilities = await fetch('/api/admin/capabilities').then(r => r.json());
+      const capabilities = await requestJson('/api/admin/capabilities');
       capabilitiesEl.innerHTML = '';
       if (capabilities.length === 0) {
         capabilitiesEl.innerHTML = '<div class="muted">No capabilities registered.</div>';
@@ -506,17 +726,39 @@ static string CapabilitiesPage()
       for (const capability of capabilities) {
         const card = document.createElement('div');
         card.className = 'card';
+        const statePill = capability.enabled ? '<span class="pill pill-ok">enabled</span>' : '<span class="pill pill-muted">disabled</span>';
+        const traitsText = (capability.traits && capability.traits.length)
+          ? `<p class="muted mt-2"><strong>Traits:</strong> ${tt.escapeHtml(capability.traits.join(', '))}</p>`
+          : '';
         card.innerHTML = `
-          <div class="row"><h2 class="panel-title"><code class="inline">${tt.escapeHtml(capability.prefix)}</code></h2><span class="pill pill-muted">prefix</span></div>
+          <div class="row">
+            <h2 class="panel-title"><code class="inline">${tt.escapeHtml(capability.prefix)}</code></h2>
+            <div class="row gap-2">${statePill}<span class="pill pill-muted">prefix</span></div>
+          </div>
           <p class="mt-2 text-sm text-slate-700">${tt.escapeHtml(capability.description || '(no description)')}</p>
-          ${capability.helpCommand ? `<p class="muted mt-2"><strong>Help:</strong> <code class="inline">${tt.escapeHtml(capability.helpCommand)}</code></p>` : ''}`;
+          ${capability.helpCommand ? `<p class="muted mt-2"><strong>Help:</strong> <code class="inline">${tt.escapeHtml(capability.helpCommand)}</code></p>` : ''}
+          ${traitsText}
+          <div class="row gap-2 mt-3">
+            <button class="btn btn-ghost btn-sm" type="button" data-action="edit">Edit</button>
+            <button class="btn btn-ghost btn-sm" type="button" data-action="toggle">${capability.enabled ? 'Disable' : 'Enable'}</button>
+          </div>`;
+
+        card.querySelector('[data-action="edit"]').addEventListener('click', () => editCapability(capability));
+        card.querySelector('[data-action="toggle"]').addEventListener('click', () => toggleCapability(capability));
         capabilitiesEl.appendChild(card);
       }
     }
+
     loadCapabilities();
     """;
 
-    return AdminLayout("Capabilities", "Host-approved actions the chat planner can use.", "capabilities", body, script);
+    return AdminLayout(
+        "Capabilities",
+        "Host-approved actions the chat planner can use.",
+        "capabilities",
+        body,
+        script,
+        "<button id=\"add\" class=\"btn btn-ghost\" type=\"button\">Add capability</button><button id=\"refresh\" class=\"btn btn-primary\" type=\"button\">Refresh</button>");
 }
 
 static string TaskLibraryPage()

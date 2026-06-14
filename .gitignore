@@ -4,5 +4,6 @@ obj/
 .vscode/
 TestResults/
 Ttasks.ChatApp/data/
+Ttasks.ChatApp/data\\*.db*
 *.user
 *.suo

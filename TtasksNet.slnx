@@ -1,5 +1,6 @@
 <Solution>
   <Project Path="Ttasks.ChatApp/Ttasks.ChatApp.csproj" />
   <Project Path="Ttasks.Core/Ttasks.Core.csproj" />
+  <Project Path="Ttasks.LiveE2ETests/Ttasks.LiveE2ETests.csproj" />
   <Project Path="Ttasks.Tests/Ttasks.Tests.csproj" />
 </Solution>
