@@ -91,10 +91,19 @@ public sealed record AdminTaskLibraryItem(
     IReadOnlyDictionary<string, object?> Metadata);
 
 public sealed record AdminAllowedTool(
+    string Id,
     string Prefix,
     string? Description,
     string? HelpCommand,
+    bool Enabled,
     IReadOnlyList<string>? Traits = null);
+
+public sealed record AdminCapabilityUpsertRequest(
+    string Prefix,
+    string? Description,
+    string? HelpCommand,
+    IReadOnlyList<string>? Traits = null,
+    bool? Enabled = null);
 
 public sealed record AdminGraphLibraryItem(
     string Id,

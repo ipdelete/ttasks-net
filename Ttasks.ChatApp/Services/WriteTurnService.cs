@@ -23,7 +23,8 @@ public sealed class WriteTurnService
 
     public WriteResponse RunAi(string? sessionId, string? turnId, int index, int total, string prompt)
     {
-        var (activeSessionId, llmSession) = _sessions.GetOrCreate(sessionId);
+        var activeSessionId = ChatSessionRegistry.ResolveSessionId(sessionId);
+        var llmSession = _sessions.GetOrCreate(activeSessionId, []);
         var activeTurnId = string.IsNullOrWhiteSpace(turnId)
             ? Guid.NewGuid().ToString("N")
             : turnId!;
@@ -97,4 +98,3 @@ public sealed record WriteResponse(
     string? GraphId,
     int TaskCount,
     bool Succeeded);
-

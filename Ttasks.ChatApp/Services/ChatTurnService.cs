@@ -51,9 +51,11 @@ public sealed class ChatTurnService
 
     public ChatResponse Handle(string? sessionId, string userMessage)
     {
-        var (activeSessionId, llmSession) = _sessions.GetOrCreate(sessionId);
+        var activeSessionId = ChatSessionRegistry.ResolveSessionId(sessionId);
         var turnId = Guid.NewGuid().ToString("N");
 
+        var capabilities = _capabilities.GetCapabilities(new CapabilityRequest(activeSessionId, userMessage));
+        var llmSession = _sessions.GetOrCreate(activeSessionId, capabilities.AllowedTools);
         var executor = CreatePromptExecutor(llmSession, includeUpstreamResults: false, _store);
         var routerTask = CoreTask.Prompt(
             Prompts.Router(userMessage),
@@ -68,7 +70,6 @@ public sealed class ChatTurnService
         if (!string.Equals(route.Mode, "graph", StringComparison.OrdinalIgnoreCase))
             throw new InvalidOperationException($"Unknown route mode '{route.Mode}'.");
 
-        var capabilities = _capabilities.GetCapabilities(new CapabilityRequest(activeSessionId, userMessage));
         if (capabilities.AllowedTools.Count == 0)
             return new ChatResponse("answer", capabilities.EmptyMessage, activeSessionId);
 
@@ -81,7 +82,7 @@ public sealed class ChatTurnService
         if (string.IsNullOrWhiteSpace(intent))
             throw new ArgumentException("Intent is required.", nameof(intent));
 
-        var (activeSessionId, llmSession) = _sessions.GetOrCreate(sessionId);
+        var activeSessionId = ChatSessionRegistry.ResolveSessionId(sessionId);
         var activeTurnId = string.IsNullOrWhiteSpace(turnId) ? Guid.NewGuid().ToString("N") : turnId!;
 
         var capabilities = _capabilities.GetCapabilities(new CapabilityRequest(activeSessionId, intent));
@@ -96,6 +97,7 @@ public sealed class ChatTurnService
                 Succeeded: false);
         }
 
+        var llmSession = _sessions.GetOrCreate(activeSessionId, capabilities.AllowedTools);
         var planningExecutor = CreatePromptExecutor(llmSession, includeUpstreamResults: false, _store);
         var turnState = RunTurn(planningExecutor, llmSession, activeSessionId, activeTurnId, intent, intent, capabilities);
         // Treat the turn as "ran" when at least one graph executed (even if some

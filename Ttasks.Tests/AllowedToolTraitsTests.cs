@@ -1,5 +1,4 @@
 using System.Text.Json;
-using Microsoft.Extensions.Options;
 using Ttasks.ChatApp.Services;
 using Ttasks.Core;
 
@@ -10,27 +9,21 @@ public sealed class AllowedToolTraitsTests
     [Fact]
     public void Normalization_Lowercases_Trims_Dedupes_And_Drops_Empties()
     {
-        var options = Options.Create(new ChatAppOptions
-        {
-            AllowedTools =
+        var store = new InMemoryAllowedToolStore();
+        var registry = new AllowedToolRegistry(store);
+        registry.Create(new AllowedToolDraft(
+            Prefix: "mail",
+            Traits:
             [
-                new AllowedToolConfig
-                {
-                    Prefix = "mail",
-                    Traits =
-                    [
-                        "  Means.Communication.Email  ",
-                        "operates.on.person",
-                        "OPERATES.ON.PERSON",
-                        " ",
-                        "operates.on.message"
-                    ]
-                }
-            ]
-        });
+                "  Means.Communication.Email  ",
+                "operates.on.person",
+                "OPERATES.ON.PERSON",
+                " ",
+                "operates.on.message"
+            ]), actor: "test");
 
-        var provider = new ConfigCapabilityProvider(
-            options,
+        var provider = new StoreBackedCapabilityProvider(
+            registry,
             new InMemoryTaskLibrary(),
             new InMemoryGraphLibrary());
 
@@ -45,16 +38,12 @@ public sealed class AllowedToolTraitsTests
     [Fact]
     public void Tool_Without_Traits_Stays_Backward_Compatible()
     {
-        var options = Options.Create(new ChatAppOptions
-        {
-            AllowedTools =
-            [
-                new AllowedToolConfig { Prefix = "echo", Description = "test" }
-            ]
-        });
+        var store = new InMemoryAllowedToolStore();
+        var registry = new AllowedToolRegistry(store);
+        registry.Create(new AllowedToolDraft(Prefix: "echo", Description: "test"), actor: "test");
 
-        var provider = new ConfigCapabilityProvider(
-            options,
+        var provider = new StoreBackedCapabilityProvider(
+            registry,
             new InMemoryTaskLibrary(),
             new InMemoryGraphLibrary());
 
@@ -94,6 +83,12 @@ public sealed class AllowedToolTraitsTests
 
         foreach (var entry in doc.RootElement.EnumerateArray())
             Assert.False(entry.TryGetProperty("traits", out _));
+    }
+
+    [Fact]
+    public void NormalizeTraits_Returns_Null_For_Empty_List()
+    {
+        Assert.Null(AllowedToolRegistry.NormalizeTraits([]));
     }
 
     private sealed class InMemoryTaskLibrary : ITaskLibrary

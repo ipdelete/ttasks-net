@@ -1,4 +1,3 @@
-using Microsoft.Extensions.Options;
 using Ttasks.Core;
 using CoreTask = Ttasks.Core.Task;
 using CoreTaskStatus = Ttasks.Core.TaskStatus;
@@ -9,14 +8,14 @@ public sealed class AdminService
 {
     private readonly ITaskStore _store;
     private readonly ITaskLibrary _library;
-    private readonly ChatAppOptions _options;
+    private readonly AllowedToolRegistry _allowedTools;
 
-    public AdminService(ITaskStore store, ITaskLibrary library, IGraphLibrary graphLibrary, IOptions<ChatAppOptions> options)
+    public AdminService(ITaskStore store, ITaskLibrary library, IGraphLibrary graphLibrary, AllowedToolRegistry allowedTools)
     {
         _store = store;
         _library = library;
         _graphLibrary = graphLibrary;
-        _options = options.Value;
+        _allowedTools = allowedTools;
     }
 
     private readonly IGraphLibrary _graphLibrary;
@@ -102,14 +101,38 @@ public sealed class AdminService
     public bool RemoveGraphLibraryItem(string key) => _graphLibrary.Remove(key);
 
     public IReadOnlyList<AdminAllowedTool> AllowedTools() =>
-        _options.AllowedTools
-            .Where(tool => !string.IsNullOrWhiteSpace(tool.Prefix))
+        _allowedTools.All()
             .Select(tool => new AdminAllowedTool(
-                tool.Prefix.Trim(),
+                tool.Id,
+                tool.Prefix,
                 tool.Description,
                 tool.HelpCommand,
-                ConfigCapabilityProvider.NormalizeTraits(tool.Traits)))
+                tool.Enabled,
+                tool.Traits))
             .ToList();
+
+    public AdminAllowedTool CreateAllowedTool(AdminCapabilityUpsertRequest request, string actor)
+    {
+        var enabled = request.Enabled ?? true;
+        var created = _allowedTools.Create(
+            new AllowedToolDraft(request.Prefix, request.Description, request.HelpCommand, request.Traits, enabled),
+            actor);
+        return ToAdminAllowedTool(created);
+    }
+
+    public AdminAllowedTool UpdateAllowedTool(string id, AdminCapabilityUpsertRequest request, string actor)
+    {
+        var existing = _allowedTools.GetById(id);
+        var enabled = request.Enabled ?? existing.Enabled;
+        var updated = _allowedTools.Update(
+            id,
+            new AllowedToolDraft(request.Prefix, request.Description, request.HelpCommand, request.Traits, enabled),
+            actor);
+        return ToAdminAllowedTool(updated);
+    }
+
+    public AdminAllowedTool SetAllowedToolEnabled(string id, bool enabled, string actor) =>
+        ToAdminAllowedTool(_allowedTools.SetEnabled(id, enabled, actor));
 
     public IReadOnlyList<AdminTurnSummary> RecentTurns(int limit = 50)
     {
@@ -242,6 +265,15 @@ public sealed class AdminService
             result.Error,
             result.ReturnCode,
             result.TerminationReason);
+
+    private static AdminAllowedTool ToAdminAllowedTool(AllowedToolDefinition tool) =>
+        new(
+            tool.Id,
+            tool.Prefix,
+            tool.Description,
+            tool.HelpCommand,
+            tool.Enabled,
+            tool.Traits);
 
     private static string GraphStatus(IReadOnlyList<CoreTask> tasks)
     {

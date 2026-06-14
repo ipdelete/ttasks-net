@@ -10,6 +10,8 @@ public sealed class ChatAppOptions
     public int MaxGraphRepairAttempts { get; set; } = 2;
     public int MaxContinuationBatches { get; set; } = 0;
     public int LlmTimeoutSeconds { get; set; } = 180;
+    public bool AdminWriteLocalOnly { get; set; } = true;
+    public string? AdminApiToken { get; set; }
     public List<AllowedToolConfig> AllowedTools { get; set; } = [];
     public List<TaskLibrarySeed> LibrarySeed { get; set; } = [];
 }

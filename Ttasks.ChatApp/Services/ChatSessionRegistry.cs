@@ -7,7 +7,8 @@ namespace Ttasks.ChatApp.Services;
 
 public sealed class ChatSessionRegistry : IDisposable
 {
-    private readonly ConcurrentDictionary<string, LlmAgentSession> _sessions = new(StringComparer.Ordinal);
+    private readonly object _gate = new();
+    private readonly ConcurrentDictionary<string, SessionEntry> _sessions = new(StringComparer.Ordinal);
     private readonly ILlmProvider _provider;
     private readonly ChatAppOptions _options;
 
@@ -17,15 +18,27 @@ public sealed class ChatSessionRegistry : IDisposable
         _options = options.Value;
     }
 
-    public (string SessionId, LlmAgentSession Session) GetOrCreate(string? sessionId)
+    public static string ResolveSessionId(string? sessionId) =>
+        string.IsNullOrWhiteSpace(sessionId) ? Guid.NewGuid().ToString("N") : sessionId;
+
+    public LlmAgentSession GetOrCreate(string sessionId, IReadOnlyList<AllowedTool> allowedTools)
     {
-        var id = string.IsNullOrWhiteSpace(sessionId) ? Guid.NewGuid().ToString("N") : sessionId;
-        return (id, _sessions.GetOrAdd(id, _ =>
+        ArgumentException.ThrowIfNullOrWhiteSpace(sessionId);
+
+        var systemMessage = Prompts.SystemMessage(allowedTools);
+        lock (_gate)
         {
-            var allowedTools = _options.AllowedTools
-                .Where(tool => !string.IsNullOrWhiteSpace(tool.Prefix))
-                .Select(tool => new AllowedTool(tool.Prefix.Trim(), tool.Description, tool.HelpCommand))
-                .ToList();
+            if (_sessions.TryGetValue(sessionId, out var existing)
+                && string.Equals(existing.SystemMessage, systemMessage, StringComparison.Ordinal))
+            {
+                return existing.Session;
+            }
+
+            if (existing is not null)
+            {
+                existing.Session.Dispose();
+                _sessions.TryRemove(sessionId, out _);
+            }
 
             var session = new LlmAgentSession(_provider, new LlmSessionOptions
             {
@@ -33,19 +46,22 @@ public sealed class ChatSessionRegistry : IDisposable
                 SystemMessage = new SystemMessageConfig
                 {
                     Mode = SystemMessageMode.Replace,
-                    Content = Prompts.SystemMessage(allowedTools)
+                    Content = systemMessage
                 },
                 SkipCustomInstructions = true
             });
             session.Enter();
+            _sessions[sessionId] = new SessionEntry(session, systemMessage);
             return session;
-        }));
+        }
     }
 
     public void Dispose()
     {
-        foreach (var session in _sessions.Values)
-            session.Dispose();
+        foreach (var entry in _sessions.Values)
+            entry.Session.Dispose();
         _sessions.Clear();
     }
+
+    private sealed record SessionEntry(LlmAgentSession Session, string SystemMessage);
 }
